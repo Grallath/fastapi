@@ -27,7 +27,10 @@ def _new_agent_instance(
     name: str,
     age: int,
     traits: str,
-    status: str
+    status: str,
+    summary_refresh_seconds: int,
+    reflection_threshold: int,
+    verbose: bool
 ) -> GenerativeAgent:
     """Factory: builds a fresh GenerativeAgent with its own FAISS memory."""
     # 1) figure out embedding dim
@@ -48,14 +51,14 @@ def _new_agent_instance(
         vectorstore=vectorstore, k=15, decay_rate=0.01
     )
 
-    # 4) memory wrapper
+    # 4) memory wrapper with custom reflection threshold
     memory = GenerativeAgentMemory(
         llm=llm,
         memory_retriever=retriever,
-        reflection_threshold=8,
+        reflection_threshold=reflection_threshold,
     )
 
-    # 5) the agent itself
+    # 5) the agent itself, with custom summary refresh & verbosity
     agent = GenerativeAgent(
         name=name,
         age=age,
@@ -63,6 +66,8 @@ def _new_agent_instance(
         status=status,
         memory=memory,
         llm=llm,
+        summary_refresh_seconds=summary_refresh_seconds,
+        verbose=verbose,
     )
 
     return agent
@@ -76,7 +81,10 @@ class CreateAgentReq(BaseModel):
     age: int
     traits: str
     status: str
-    agent_id: Optional[str] = None  # supply your own or let server generate
+    agent_id: Optional[str] = None
+    summary_refresh_seconds: int = 0    # disable auto-refresh by default
+    reflection_threshold: int = 20      # bump threshold to 20 by default
+    verbose: bool = False               # extra debug logging
 
 class TalkReq(BaseModel):
     prompt: str
@@ -96,7 +104,10 @@ def create_agent(req: CreateAgentReq):
         name=req.name,
         age=req.age,
         traits=req.traits,
-        status=req.status
+        status=req.status,
+        summary_refresh_seconds=req.summary_refresh_seconds,
+        reflection_threshold=req.reflection_threshold,
+        verbose=req.verbose,
     )
     return {"agent_id": aid}
 
