@@ -1,3 +1,5 @@
+# main.py
+
 from datetime import datetime
 from typing import Optional, Dict
 from uuid import uuid4
@@ -17,12 +19,11 @@ from langchain_experimental.generative_agents import (
 
 app = FastAPI(title="Generative-Agent API (Dynamic)")
 
-# --- Health check so Render sees a 200 on GET / ---
 @app.get("/")
 async def health_check():
     return {"status": "ok"}
 
-# ——— Shared LLM & embeddings across all agents —————————
+# ——— shared LLM & embeddings ——————————————————
 llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.7)
 emb = OpenAIEmbeddings()
 
@@ -35,9 +36,10 @@ def _new_agent_instance(
     reflection_threshold: int,
     verbose: bool
 ) -> GenerativeAgent:
+    # 1) probe embedding size
     probe = emb.embed_query("probe")
     dim = len(probe)
-
+    # 2) make empty FAISS
     index = faiss.IndexFlatL2(dim)
     vectorstore = FAISS(
         embedding_function=emb,
@@ -45,17 +47,18 @@ def _new_agent_instance(
         docstore=InMemoryDocstore({}),
         index_to_docstore_id={},
     )
-
+    # 3) time‐weighted retriever
     retriever = TimeWeightedVectorStoreRetriever(
         vectorstore=vectorstore, k=15, decay_rate=0.01
     )
-
+    # 4) interpret 0 → never auto-reflect
+    actual_threshold = reflection_threshold if reflection_threshold > 0 else float("inf")
     memory = GenerativeAgentMemory(
         llm=llm,
         memory_retriever=retriever,
-        reflection_threshold=reflection_threshold,
+        reflection_threshold=actual_threshold,
     )
-
+    # 5) build the agent
     agent = GenerativeAgent(
         name=name,
         age=age,
@@ -66,11 +69,11 @@ def _new_agent_instance(
         summary_refresh_seconds=summary_refresh_seconds,
         verbose=verbose,
     )
-
     return agent
 
 agents: Dict[str, GenerativeAgent] = {}
 
+# ——— Pydantic models ———————————————————————————————
 class CreateAgentReq(BaseModel):
     name: str
     age: int
@@ -78,14 +81,18 @@ class CreateAgentReq(BaseModel):
     status: str
     agent_id: Optional[str] = None
     summary_refresh_seconds: int = 0
-    reflection_threshold: int = 20
+    reflection_threshold: int = 0   # 0 → never; 1 → after each obs; etc.
     verbose: bool = False
 
 class TalkReq(BaseModel):
     prompt: str
+    k: Optional[int] = None            # override top-k memories
+    write_memory: Optional[bool] = True  # whether to add prompt to memory
 
 class ObserveReq(BaseModel):
     observation: str
+
+# ——— Endpoints ———————————————————————————————————————
 
 @app.post("/agents")
 def create_agent(req: CreateAgentReq):
@@ -115,8 +122,12 @@ def talk(agent_id: str, req: TalkReq):
     if not text:
         raise HTTPException(400, "Prompt may not be empty")
     agent = agents[agent_id]
+    # temporarily override top-k
+    if req.k is not None:
+        agent.memory.memory_retriever.k = req.k
     should_write, response = agent.generate_dialogue_response(text, datetime.now())
-    if should_write:
+    # only write into memory if explicitly desired
+    if req.write_memory and should_write:
         agent.memory.add_memory(text)
     return {"agent": agent.name, "response": response}
 
@@ -143,7 +154,3 @@ def delete_agent(agent_id: str):
         raise HTTPException(404, f"No such agent '{agent_id}'")
     del agents[agent_id]
     return {"deleted": agent_id}
-
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: Optional[str] = None):
-    return {"item_id": item_id, "q": q}
