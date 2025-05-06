@@ -4,6 +4,8 @@ fastapi[all]
 # LangChain primitives
 langchain~=0.2          # core
 langchain-experimental~=0.2  # contains generative_agents
+langchain-community~=0.2
+langchain-openai~=0.1  # houses ChatOpenAI & OpenAIEmbeddings
 
 # LLM + embeddings (pick the provider you’ll really use)
 openai>=1.25.0
