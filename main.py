@@ -4,25 +4,25 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# -------- LangChain imports --------
-from langchain.chat_models import ChatOpenAI
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.retrievers import TimeWeightedVectorStoreRetriever
+# NEW import paths (no more deprecation warnings)
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
 from langchain_experimental.generative_agents import (
     GenerativeAgent,
     GenerativeAgentMemory,
 )
+from langchain.retrievers import TimeWeightedVectorStoreRetriever
 
 app = FastAPI(title="Generative‑Agent API")
 
-# -------- LLM + embeddings ----------
+# ---------- LLM & embeddings ----------
 llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.7)
 emb = OpenAIEmbeddings()
 
-# -------- Vector store --------------
-vectorstore = FAISS(emb.embedding_function, faiss_index_factory_str="Flat")
-retriever = TimeWeightedVectorStoreRetriever(
+# ---------- Vector store --------------
+# ① Start with an empty store; we’ll add memories on the fly
+vectorstore = FAISS.from_texts([], emb)        # ✅ no attribute error
+retriever   = TimeWeightedVectorStoreRetriever(
     vectorstore=vectorstore, k=15, decay_rate=0.01
 )
 
@@ -41,14 +41,14 @@ agent = GenerativeAgent(
     llm=llm,
 )
 
-# ---------- Pydantic models ---------
+# ---------- Pydantic models ----------
 class TalkReq(BaseModel):
     prompt: str
 
 class ObserveReq(BaseModel):
     observation: str
 
-# ---------- Endpoints ---------------
+# ---------- Endpoints ----------------
 @app.get("/")
 async def root():
     return {"message": "Your Generative‑Agent is alive!"}
@@ -71,7 +71,7 @@ async def observe(req: ObserveReq):
 async def summary():
     return {"summary": agent.get_summary(force_refresh=True)}
 
-# (optional) keep your old endpoint
+# (optional) keep your demo endpoint
 @app.get("/items/{item_id}")
 def read_item(item_id: int, q: Optional[str] = None):
     return {"item_id": item_id, "q": q}
