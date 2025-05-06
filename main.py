@@ -152,5 +152,15 @@ def summary(agent_id: str):
 
 # (Optional legacy endpoint)
 @app.get("/items/{item_id}")
+
+@app.delete("/agents/{agent_id}")
+def delete_agent(agent_id: str):
+    """Remove the named agent permanently."""
+    if agent_id not in agents:
+        raise HTTPException(404, f"No such agent '{agent_id}'")
+    # drop it from memory
+    del agents[agent_id]
+    return {"deleted": agent_id}
+
 def read_item(item_id: int, q: Optional[str] = None):
     return {"item_id": item_id, "q": q}
