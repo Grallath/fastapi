@@ -23,14 +23,11 @@ llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.7)
 emb = OpenAIEmbeddings()
 
 # ---------- Create an empty FAISS store ----------
-# Probe embedding dimension with a single query
+# Probe embedding dimension with one call
 _embedding_probe = emb.embed_query("probe vector dimension")
 embedding_size = len(_embedding_probe)
 
-# Build a FAISS index for L2 distance
 index = faiss.IndexFlatL2(embedding_size)
-
-# Wire up the LangChain FAISS wrapper with an empty in-memory docstore
 vectorstore = FAISS(
     embedding_function=emb,
     index=index,
@@ -73,17 +70,26 @@ async def root():
 
 @app.post("/talk")
 async def talk(req: TalkReq):
-    if not req.prompt.strip():
+    text = req.prompt.strip()
+    if not text:
         raise HTTPException(400, "Prompt may not be empty")
-    reply = agent.generate_dialog_response(req.prompt, datetime.now())
-    return {"agent": agent.name, "response": reply}
+
+    # NOTE: generate_dialogue_response returns (should_write_memory: bool, response: str)
+    should_write, response = agent.generate_dialogue_response(text, datetime.now())
+
+    # Optionally add the user’s prompt to memory if the agent thinks it’s important
+    if should_write:
+        agent.memory.add_memory(text)
+
+    return {"agent": agent.name, "response": response}
 
 @app.post("/observe")
 async def observe(req: ObserveReq):
-    if not req.observation.strip():
+    obs = req.observation.strip()
+    if not obs:
         raise HTTPException(400, "Observation may not be empty")
-    agent.memory.add_memory(req.observation)
-    return {"stored": req.observation}
+    agent.memory.add_memory(obs)
+    return {"stored": obs}
 
 @app.get("/summary")
 async def summary():
