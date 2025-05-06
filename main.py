@@ -1,35 +1,53 @@
+# main.py
+
 from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# NEW import paths (no more deprecation warnings)
+import faiss
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_community.docstore.in_memory import InMemoryDocstore
+from langchain.retrievers import TimeWeightedVectorStoreRetriever
 from langchain_experimental.generative_agents import (
     GenerativeAgent,
     GenerativeAgentMemory,
 )
-from langchain.retrievers import TimeWeightedVectorStoreRetriever
 
-app = FastAPI(title="Generative‑Agent API")
+app = FastAPI(title="Generative-Agent API")
 
 # ---------- LLM & embeddings ----------
 llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.7)
 emb = OpenAIEmbeddings()
 
-# ---------- Vector store --------------
-# ① Start with an empty store; we’ll add memories on the fly
-vectorstore = FAISS.from_texts([], emb)        # ✅ no attribute error
-retriever   = TimeWeightedVectorStoreRetriever(
-    vectorstore=vectorstore, k=15, decay_rate=0.01
+# ---------- Create an empty FAISS store ----------
+# Probe embedding dimension with a single query
+_embedding_probe = emb.embed_query("probe vector dimension")
+embedding_size = len(_embedding_probe)
+
+# Build a FAISS index for L2 distance
+index = faiss.IndexFlatL2(embedding_size)
+
+# Wire up the LangChain FAISS wrapper with an empty in-memory docstore
+vectorstore = FAISS(
+    embedding_function=emb,
+    index=index,
+    docstore=InMemoryDocstore({}),
+    index_to_docstore_id={},
+)
+
+retriever = TimeWeightedVectorStoreRetriever(
+    vectorstore=vectorstore,
+    k=15,
+    decay_rate=0.01,
 )
 
 memory = GenerativeAgentMemory(
     llm=llm,
     memory_retriever=retriever,
-    reflection_threshold=8
+    reflection_threshold=8,
 )
 
 agent = GenerativeAgent(
@@ -51,7 +69,7 @@ class ObserveReq(BaseModel):
 # ---------- Endpoints ----------------
 @app.get("/")
 async def root():
-    return {"message": "Your Generative‑Agent is alive!"}
+    return {"message": "Your Generative-Agent is alive!"}
 
 @app.post("/talk")
 async def talk(req: TalkReq):
@@ -71,7 +89,7 @@ async def observe(req: ObserveReq):
 async def summary():
     return {"summary": agent.get_summary(force_refresh=True)}
 
-# (optional) keep your demo endpoint
+# (Optional) preserve your existing demo endpoint
 @app.get("/items/{item_id}")
 def read_item(item_id: int, q: Optional[str] = None):
     return {"item_id": item_id, "q": q}
