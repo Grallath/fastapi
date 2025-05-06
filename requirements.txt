@@ -1,1 +1,13 @@
+# core web framework
 fastapi[all]
+
+# LangChain primitives
+langchain~=0.2          # core
+langchain-experimental~=0.2  # contains generative_agents
+
+# LLM + embeddings (pick the provider you’ll really use)
+openai>=1.25.0
+tiktoken>=0.6.0
+
+# simple in‑process vector store for agent memory
+faiss-cpu>=1.8.0
