@@ -136,30 +136,53 @@ class AutonomousGenerativeAgent(GenerativeAgent):
     def _get_entity_from_observation(self, observation: str) -> str:
         """Extract the main entity from an observation."""
         prompt = PromptTemplate.from_template(
-            "What is the observed entity in the following observation? {observation}"
-            + "\nEntity="
+            "In the following observation, identify the main entity or person OTHER THAN {agent_name} who is being observed. "
+            "If there are multiple entities, identify the most prominent one. "
+            "If there is no entity other than {agent_name}, respond with 'no other entity'.\n\n"
+            "Observation: {observation}\n\n"
+            "Main entity (not {agent_name}):"
         )
         try:
-            entity = self.chain(prompt).run(observation=observation).strip()
+            entity = self.chain(prompt).run(agent_name=self.name, observation=observation).strip()
+            
+            # Validate that the entity isn't the agent itself
+            if self.name.lower() in entity.lower() or "myself" in entity.lower() or "me" in entity.lower():
+                print(f"{BColors.WARNING}WARN (Agent {self.name}): Entity extraction returned the agent itself. Using fallback.{BColors.ENDC}", flush=True)
+                return "the other person in the observation"
+                
+            if "no other entity" in entity.lower() or "no entity" in entity.lower():
+                print(f"{BColors.DIM}DEBUG (Agent {self.name}): No entity found in observation.{BColors.ENDC}", flush=True)
+                return "the environment or situation"
+                
+            # Clean up the response to get just the entity name
+            entity = entity.replace("The main entity is", "").replace("Main entity:", "").strip()
+            
             print(f"{BColors.DIM}DEBUG (Agent {self.name}): Identified entity: '{entity}' from observation{BColors.ENDC}", flush=True)
             return entity
         except Exception as e:
             print(f"{BColors.WARNING}WARN (Agent {self.name}): Failed to extract entity: {e}. Using fallback.{BColors.ENDC}", flush=True)
-            return "unknown entity"
+            return "the other person or entity in the observation"
 
     def _get_entity_action(self, observation: str, entity_name: str) -> str:
         """Determine what the entity is doing in the observation."""
         prompt = PromptTemplate.from_template(
-            "What is the {entity} doing in the following observation? {observation}"
-            + "\nThe {entity} is"
+            "Based on the following observation, what is {entity} doing? Describe their actions concisely.\n\n"
+            "Observation: {observation}\n\n"
+            "What {entity} is doing:"
         )
         try:
             action = self.chain(prompt).run(entity=entity_name, observation=observation).strip()
+            
+            # Clean up the response
+            action = action.replace(f"{entity_name} is", "").strip()
+            if action.startswith("is "):
+                action = action[3:]
+                
             print(f"{BColors.DIM}DEBUG (Agent {self.name}): Identified action: '{entity_name} is {action}'{BColors.ENDC}", flush=True)
             return action
         except Exception as e:
             print(f"{BColors.WARNING}WARN (Agent {self.name}): Failed to extract action: {e}. Using fallback.{BColors.ENDC}", flush=True)
-            return "present"
+            return "present in the scene"
 
     def summarize_related_memories(self, observation: str, now: Optional[datetime] = None) -> str:
         """Summarize memories that are most relevant to an observation, focusing on relationships."""
@@ -171,26 +194,62 @@ class AutonomousGenerativeAgent(GenerativeAgent):
             print(f"{BColors.DIM}DEBUG (Agent {self.name}): Using cached relationship context{BColors.ENDC}", flush=True)
             return self.cached_relationship_context
             
+        # First, identify the entity
+        entity_name = self._get_entity_from_observation(observation)
+        
+        # If no meaningful entity was found, return a default message
+        if entity_name in ["the environment or situation", "no other entity"]:
+            default_context = "No specific entities to establish a relationship with."
+            self.cached_relationship_context = default_context
+            self.cached_relationship_time = current_time
+            return default_context
+            
+        # Get what the entity is doing
+        entity_action = self._get_entity_action(observation, entity_name)
+        
+        # Now query for relationship information
         prompt = PromptTemplate.from_template(
-            """
-{q1}?
-Context from memory:
-{relevant_memories}
-Relevant context: 
-"""
+            "Based on your memories, what is your relationship or knowledge about {entity_name}?\n"
+            "Consider:\n"
+            "1. Have you met {entity_name} before?\n"
+            "2. Do you have any history with {entity_name}?\n"
+            "3. Do you have any feelings or opinions about {entity_name}?\n"
+            "4. Is there anything notable about {entity_name}?\n\n"
+            "Context from your memories:\n{relevant_memories}\n\n"
+            "Current observation: {entity_name} is {entity_action}\n\n"
+            "Relationship with {entity_name} (be concise, if no relationship exists, state that clearly):"
         )
         
         try:
-            entity_name = self._get_entity_from_observation(observation)
-            entity_action = self._get_entity_action(observation, entity_name)
-            q1 = f"What is the relationship between {self.name} and {entity_name}"
-            q2 = f"{entity_name} is {entity_action}"
+            # Fetch memories specifically about this entity
+            relevant_memories = self.memory.fetch_memories(entity_name, now=now)
+            
+            # If no specific memories, try fetching with a broader query
+            if not relevant_memories:
+                broader_queries = [
+                    f"{entity_name}",
+                    f"relationship with {entity_name}",
+                    f"opinion about {entity_name}",
+                    f"knowledge of {entity_name}"
+                ]
+                for query in broader_queries:
+                    memories = self.memory.fetch_memories(query, now=now)
+                    if memories:
+                        relevant_memories.extend(memories)
+                        break
+            
+            # Format memories for the prompt
+            memory_str = "\n".join([f"- {mem.page_content}" for mem in relevant_memories]) if relevant_memories else "No specific memories about this entity."
             
             # Get relationship context
-            relationship_context = self.chain(prompt=prompt).run(q1=q1, queries=[q1, q2]).strip()
+            relationship_context = self.chain(prompt).run(
+                entity_name=entity_name,
+                entity_action=entity_action,
+                relevant_memories=memory_str
+            ).strip()
             
-            if not relationship_context or relationship_context.lower() == "none" or relationship_context.lower() == "no relevant context":
-                relationship_context = f"No known relationship with {entity_name}."
+            if not relationship_context or relationship_context.lower() == "none" or "no relationship" in relationship_context.lower():
+                relationship_context = f"You have no prior relationship with {entity_name}. This appears to be your first encounter."
                 
             print(f"{BColors.OKBLUE}DEBUG (Agent {self.name}): Generated relationship context: {relationship_context}{BColors.ENDC}", flush=True)
             
@@ -201,7 +260,10 @@ Relevant context:
             return relationship_context
         except Exception as e:
             print(f"{BColors.WARNING}WARN (Agent {self.name}): Failed to summarize related memories: {e}. Using fallback.{BColors.ENDC}", flush=True)
-            return "No specific relationship information available."
+            fallback = f"No specific relationship information available about {entity_name}."
+            self.cached_relationship_context = fallback
+            self.cached_relationship_time = current_time
+            return fallback
 
     def _fetch_context(self, observation: str, now: Optional[datetime] = None) -> Tuple[str, str]:
         """Helper to get memory context and current time string."""
@@ -305,10 +367,13 @@ Relevant context:
 
         self._initialize_chains()
         call_time = now or datetime.now()
-        reaction_type = self._decide_reaction_type(observation, call_time)
-
-        # Get relationship context for the observation
+        
+        # First, get relationship context - do this BEFORE deciding reaction type
+        # This ensures entity extraction happens first and independently
         relationship_context = self.summarize_related_memories(observation, call_time)
+        
+        # Now decide on reaction type
+        reaction_type = self._decide_reaction_type(observation, call_time)
 
         # Assess observation importance
         observation_poignancy = 0
