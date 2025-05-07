@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from uuid import uuid4
-from math import inf # We might not need inf anymore for these specific parameters
+# from math import inf # No longer needed for these parameters
 import os 
 import traceback 
 
@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 import faiss
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings # Correct import
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain.retrievers import TimeWeightedVectorStoreRetriever
@@ -24,24 +24,22 @@ app = FastAPI(title="Generative-Agent API (Refactored)")
 
 print("DEBUG: FastAPI application starting up...", flush=True)
 
+# Default model names if not provided in requests
+DEFAULT_CHAT_MODEL = "gpt-4o-mini"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small" 
+
 @app.get("/")
 async def health_check():
     print("DEBUG: Health check '/' endpoint hit.", flush=True)
     return {"status": "ok"}
 
-print("DEBUG: Attempting to initialize global OpenAIEmbeddings instance 'emb'...", flush=True)
-GLOBAL_EMBEDDING_INSTANCE = None
-try:
-    if not os.getenv("OPENAI_API_KEY"):
-        print("CRITICAL_WARNING: OPENAI_API_KEY environment variable is NOT SET at the time of global 'emb' initialization. This will likely cause failure when 'emb' is used.", flush=True)
-    
-    GLOBAL_EMBEDDING_INSTANCE = OpenAIEmbeddings()
-    GLOBAL_EMBEDDING_INSTANCE.embed_query("startup_test_embedding")
-    print("DEBUG: Global 'GLOBAL_EMBEDDING_INSTANCE' initialized and tested successfully.", flush=True)
-except Exception as e:
-    print(f"CRITICAL_ERROR: Failed to initialize or test global 'GLOBAL_EMBEDDING_INSTANCE' OpenAIEmbeddings: {e}", flush=True)
-    print("Full stack trace for global embedding initialization failure:", flush=True)
-    traceback.print_exc()
+# No more GLOBAL_EMBEDDING_INSTANCE, each agent will initialize its own.
+# We still check for OPENAI_API_KEY at startup as a general health indicator.
+if not os.getenv("OPENAI_API_KEY"):
+    print("CRITICAL_WARNING: OPENAI_API_KEY environment variable is NOT SET. OpenAI calls will likely fail.", flush=True)
+else:
+    print("DEBUG: OPENAI_API_KEY environment variable is detected.", flush=True)
+
 
 def _new_agent_instance(
     name: str,
@@ -51,53 +49,54 @@ def _new_agent_instance(
     summary_refresh_seconds: int,
     reflection_threshold: int,
     verbose: bool,
-    model_name: Optional[str] = None
+    llm_model_name: Optional[str] = None,         # Renamed for clarity
+    embedding_model_name: Optional[str] = None  # NEW: embedding_model_name parameter
 ) -> GenerativeAgent:
-    print(f"DEBUG: _new_agent_instance called for agent '{name}' with model_name: '{model_name}'", flush=True)
-    print(f"DEBUG: Input summary_refresh_seconds: {summary_refresh_seconds}, reflection_threshold: {reflection_threshold}", flush=True)
+    print(f"DEBUG: _new_agent_instance called for agent '{name}'", flush=True)
+    print(f"DEBUG:   LLM Model Request: '{llm_model_name}', Embedding Model Request: '{embedding_model_name}'", flush=True)
+    print(f"DEBUG:   Summary Refresh: {summary_refresh_seconds}, Reflection Threshold: {reflection_threshold}", flush=True)
 
-
-    if not os.getenv("OPENAI_API_KEY"):
-        print("CRITICAL_ERROR: OPENAI_API_KEY environment variable is NOT SET within _new_agent_instance. OpenAI calls will fail.", flush=True)
+    effective_llm_model = llm_model_name if llm_model_name and llm_model_name.strip() else DEFAULT_CHAT_MODEL
+    effective_embedding_model = embedding_model_name if embedding_model_name and embedding_model_name.strip() else DEFAULT_EMBEDDING_MODEL
     
-    effective_model_name = model_name if model_name and model_name.strip() else "gpt-4o-mini"
-    print(f"DEBUG: Effective model name for agent '{name}': {effective_model_name}", flush=True)
+    print(f"DEBUG:   Effective LLM Model: '{effective_llm_model}'", flush=True)
+    print(f"DEBUG:   Effective Embedding Model: '{effective_embedding_model}'", flush=True)
 
     agent_llm = None
     try:
-        print(f"DEBUG: Attempting to initialize ChatOpenAI for agent '{name}' with model: {effective_model_name}", flush=True)
-        agent_llm = ChatOpenAI(model_name=effective_model_name, temperature=0.7)
-        print(f"DEBUG: ChatOpenAI for agent '{name}' (model {effective_model_name}) initialized.", flush=True)
+        print(f"DEBUG: Attempting to initialize ChatOpenAI for agent '{name}' with model: {effective_llm_model}", flush=True)
+        agent_llm = ChatOpenAI(model_name=effective_llm_model, temperature=0.7)
+        print(f"DEBUG: ChatOpenAI for agent '{name}' (model {effective_llm_model}) initialized.", flush=True)
     except Exception as e:
-        print(f"ERROR_STACKTRACE: Failed to initialize LLM for agent '{name}' with model '{effective_model_name}': {e}", flush=True)
+        print(f"ERROR_STACKTRACE: Failed to initialize LLM for agent '{name}' with model '{effective_llm_model}': {e}", flush=True)
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to initialize LLM with model '{effective_model_name}': {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to initialize LLM with model '{effective_llm_model}': {e}")
 
-    if GLOBAL_EMBEDDING_INSTANCE is None:
-        print("CRITICAL_ERROR: Global 'GLOBAL_EMBEDDING_INSTANCE' is None. Cannot proceed with agent creation that requires embeddings.", flush=True)
-        raise HTTPException(status_code=500, detail="Core embedding system failed to initialize. Agent creation aborted.")
-
+    agent_embeddings = None
+    dim = 0 # Initialize dim
     try:
-        probe_for_dim = GLOBAL_EMBEDDING_INSTANCE.embed_query("get_dim_probe")
+        print(f"DEBUG: Attempting to initialize OpenAIEmbeddings for agent '{name}' with model: {effective_embedding_model}", flush=True)
+        agent_embeddings = OpenAIEmbeddings(model=effective_embedding_model)
+        # Test embedding and get dimension
+        probe_for_dim = agent_embeddings.embed_query("get_dim_probe_for_agent")
         dim = len(probe_for_dim)
-        print(f"DEBUG: Embedding dimension confirmed as {dim} for agent '{name}'.", flush=True)
+        print(f"DEBUG: OpenAIEmbeddings for agent '{name}' (model {effective_embedding_model}, dim {dim}) initialized and tested.", flush=True)
     except Exception as e:
-        print(f"ERROR_STACKTRACE: Failed to confirm embedding dimension for agent '{name}': {e}", flush=True)
+        print(f"ERROR_STACKTRACE: Failed to initialize or test OpenAIEmbeddings for agent '{name}' with model '{effective_embedding_model}': {e}", flush=True)
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to confirm embedding dimension: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to initialize/test embeddings with model '{effective_embedding_model}': {e}")
 
-
-    print(f"DEBUG: Setting up FAISS index for agent '{name}'...", flush=True)
+    print(f"DEBUG: Setting up FAISS index for agent '{name}' (dim: {dim})...", flush=True)
     try:
         index = faiss.IndexFlatL2(dim)
         vectorstore = FAISS(
-            embedding_function=GLOBAL_EMBEDDING_INSTANCE,
+            embedding_function=agent_embeddings, # Use agent-specific embeddings
             index=index,
             docstore=InMemoryDocstore({}),
             index_to_docstore_id={},
         )
         retriever = TimeWeightedVectorStoreRetriever(
-            vectorstore=vectorstore, k=15, decay_rate=0.01
+            vectorstore=vectorstore, k=15, decay_rate=0.01 # Default k for retriever
         )
         print(f"DEBUG: FAISS setup complete for agent '{name}'.", flush=True)
     except Exception as e:
@@ -107,8 +106,6 @@ def _new_agent_instance(
 
     print(f"DEBUG: Setting up GenerativeAgentMemory for agent '{name}'...", flush=True)
     try:
-        # If reflection_threshold from input is 0 or less, pass None to GenerativeAgentMemory.
-        # The GenerativeAgentMemory itself handles None by setting a very high internal threshold (effectively infinity).
         actual_reflect_for_memory = reflection_threshold if reflection_threshold > 0 else None
         print(f"DEBUG: actual_reflect_for_memory will be: {actual_reflect_for_memory}", flush=True)
         
@@ -125,7 +122,6 @@ def _new_agent_instance(
 
     print(f"DEBUG: Initializing GenerativeAgent '{name}'...", flush=True)
     try:
-        # For GenerativeAgent, if summary_refresh_seconds from input is 0 or less, pass None.
         actual_refresh_for_agent = summary_refresh_seconds if summary_refresh_seconds > 0 else None
         print(f"DEBUG: actual_refresh_for_agent will be: {actual_refresh_for_agent}", flush=True)
 
@@ -146,7 +142,7 @@ def _new_agent_instance(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed during GenerativeAgent initialization: {e}")
 
-agents: Dict[str, GenerativeAgent] = {}
+agents: Dict[str, GenerativeAgent] = {} # Stores GenerativeAgent instances
 
 class CreateAgentReq(BaseModel):
     name: str
@@ -157,7 +153,8 @@ class CreateAgentReq(BaseModel):
     summary_refresh_seconds: int = Field(default=0, ge=0)
     reflection_threshold: int = Field(default=0, ge=0)
     verbose: bool = False
-    model_name: Optional[str] = None
+    model_name: Optional[str] = None         # For LLM (chat model)
+    embedding_model_name: Optional[str] = None # NEW: For Embeddings
 
 class GenerateResponseReq(BaseModel):
     prompt: str
@@ -178,13 +175,10 @@ def create_agent(req: CreateAgentReq):
         print(f"WARN: Agent with agent_id '{aid}' already exists.", flush=True)
         raise HTTPException(status_code=400, detail=f"Agent with agent_id '{aid}' already exists.")
     
-    if GLOBAL_EMBEDDING_INSTANCE is None:
-        print("CRITICAL_ERROR: Global embedding instance not available. Aborting agent creation.", flush=True)
-        raise HTTPException(status_code=500, detail="Server's core embedding system is not operational.")
-
+    current_agent_instance = None # To hold the created agent for reporting
     try:
         print(f"DEBUG: Calling _new_agent_instance for agent_id '{aid}' with name '{req.name}'", flush=True)
-        agents[aid] = _new_agent_instance(
+        current_agent_instance = _new_agent_instance( 
             name=req.name,
             age=req.age,
             traits=req.traits,
@@ -192,8 +186,10 @@ def create_agent(req: CreateAgentReq):
             summary_refresh_seconds=req.summary_refresh_seconds,
             reflection_threshold=req.reflection_threshold,
             verbose=req.verbose,
-            model_name=req.model_name
+            llm_model_name=req.model_name, 
+            embedding_model_name=req.embedding_model_name 
         )
+        agents[aid] = current_agent_instance 
         print(f"DEBUG: Agent '{aid}' (name: '{req.name}') created and stored.", flush=True)
     except HTTPException as e: 
         print(f"DEBUG: HTTPException caught in create_agent for agent_id '{aid}': {e.detail}", flush=True)
@@ -203,39 +199,73 @@ def create_agent(req: CreateAgentReq):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Unexpected server error during agent creation: {e}")
         
-    model_actually_used = "unknown"
-    try:
-        current_agent_llm = agents[aid].llm
-        if hasattr(current_agent_llm, 'model_name'):
-            model_actually_used = current_agent_llm.model_name
-        elif hasattr(current_agent_llm, 'model'):
-             model_actually_used = current_agent_llm.model
-    except KeyError: 
-        print(f"ERROR: Agent {aid} not found in agents dict immediately after creation attempt.", flush=True)
-        raise HTTPException(status_code=500, detail="Internal inconsistency after agent creation.")
+    llm_model_used = "unknown"
+    embedding_model_used = "unknown"
+
+    if current_agent_instance: # Use the instance we created
+        if hasattr(current_agent_instance, 'llm') and current_agent_instance.llm and hasattr(current_agent_instance.llm, 'model_name'):
+            llm_model_used = current_agent_instance.llm.model_name
+        
+        if (hasattr(current_agent_instance, 'memory') and current_agent_instance.memory and
+            hasattr(current_agent_instance.memory, 'memory_retriever') and current_agent_instance.memory.memory_retriever and
+            hasattr(current_agent_instance.memory.memory_retriever, 'vectorstore') and current_agent_instance.memory.memory_retriever.vectorstore and
+            hasattr(current_agent_instance.memory.memory_retriever.vectorstore, 'embedding_function') and 
+            current_agent_instance.memory.memory_retriever.vectorstore.embedding_function and
+            hasattr(current_agent_instance.memory.memory_retriever.vectorstore.embedding_function, 'model')):
+            embedding_model_used = current_agent_instance.memory.memory_retriever.vectorstore.embedding_function.model
+    else:
+        # This case should not be reached if creation was truly successful and stored in 'agents' dict
+        print(f"ERROR: current_agent_instance is None after creation attempt for agent_id '{aid}'. This indicates a logic flaw.", flush=True)
+        # Fallback: Try to get from agents dict if it somehow got there but not in current_agent_instance
+        if aid in agents:
+            retrieved_agent = agents[aid]
+            if hasattr(retrieved_agent, 'llm') and retrieved_agent.llm and hasattr(retrieved_agent.llm, 'model_name'):
+                 llm_model_used = retrieved_agent.llm.model_name
+            if (hasattr(retrieved_agent, 'memory') # ... (full chain for embedding model)
+                and hasattr(retrieved_agent.memory.memory_retriever.vectorstore.embedding_function, 'model')):
+                 embedding_model_used = retrieved_agent.memory.memory_retriever.vectorstore.embedding_function.model
 
 
-    print(f"DEBUG: Agent '{aid}' (name: '{req.name}') creation successful. Model used: {model_actually_used}. Responding to client.", flush=True)
-    return {"agent_id": aid, "name": req.name, "model_used": model_actually_used}
+    print(f"DEBUG: Agent '{aid}' creation processing complete. LLM: {llm_model_used}, Embedding: {embedding_model_used}. Responding.", flush=True)
+    return {
+        "agent_id": aid, 
+        "name": req.name, 
+        "llm_model_used": llm_model_used,
+        "embedding_model_used": embedding_model_used
+    }
 
 @app.get("/agents")
 def list_agents():
     print("DEBUG: /agents GET request received (list_agents)", flush=True)
-    if GLOBAL_EMBEDDING_INSTANCE is None and len(agents) > 0 : 
-         print("WARN: Listing agents, but global embedding instance is not available.", flush=True)
-
     agent_details = []
-    for agent_id, agent_instance in agents.items():
-        model_used = "unknown"
-        if agent_instance and hasattr(agent_instance, 'llm') and agent_instance.llm:
-            if hasattr(agent_instance.llm, 'model_name'):
-                model_used = agent_instance.llm.model_name
-            elif hasattr(agent_instance.llm, 'model'):
-                model_used = agent_instance.llm.model
-        else:
-            print(f"WARN: Agent {agent_id} found in dict, but has no LLM instance or is malformed.", flush=True)
+    for agent_id, agent_instance_from_dict in agents.items():
+        llm_model = "unknown"
+        emb_model = "unknown"
+        agent_name_from_instance = "Unknown Name" # Default
 
-        agent_details.append({"agent_id": agent_id, "name": agent_instance.name if agent_instance else "Unknown Name", "model": model_used})
+        if agent_instance_from_dict: # Check if the instance from dict is not None
+            agent_name_from_instance = agent_instance_from_dict.name
+            if hasattr(agent_instance_from_dict, 'llm') and agent_instance_from_dict.llm and hasattr(agent_instance_from_dict.llm, 'model_name'):
+                llm_model = agent_instance_from_dict.llm.model_name
+            
+            if (hasattr(agent_instance_from_dict, 'memory') and agent_instance_from_dict.memory and
+                hasattr(agent_instance_from_dict.memory, 'memory_retriever') and agent_instance_from_dict.memory.memory_retriever and
+                hasattr(agent_instance_from_dict.memory.memory_retriever, 'vectorstore') and agent_instance_from_dict.memory.memory_retriever.vectorstore and
+                hasattr(agent_instance_from_dict.memory.memory_retriever.vectorstore, 'embedding_function') and 
+                agent_instance_from_dict.memory.memory_retriever.vectorstore.embedding_function and
+                hasattr(agent_instance_from_dict.memory.memory_retriever.vectorstore.embedding_function, 'model')):
+                emb_model = agent_instance_from_dict.memory.memory_retriever.vectorstore.embedding_function.model
+        else:
+            print(f"WARN: Agent {agent_id} found in agents dictionary, but its instance is None.", flush=True)
+            # Attempt to get name from request if agent_id matches a key, though instance is primary source
+            # This situation implies an issue, so data might be incomplete.
+
+        agent_details.append({
+            "agent_id": agent_id, 
+            "name": agent_name_from_instance, 
+            "llm_model": llm_model,
+            "embedding_model": emb_model
+        })
     print(f"DEBUG: Returning {len(agent_details)} agents.", flush=True)
     return {"agents": agent_details}
 
@@ -243,17 +273,24 @@ def list_agents():
 @app.post("/agents/{agent_id}/generate_response")
 def generate_response(agent_id: str, req: GenerateResponseReq):
     print(f"DEBUG: /generate_response for agent {agent_id} with prompt: '{req.prompt[:50]}...'", flush=True)
-    if agent_id not in agents:
-        print(f"ERROR: Agent '{agent_id}' not found for generate_response.", flush=True)
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
+    if agent_id not in agents or agents[agent_id] is None: # Added check for None instance
+        print(f"ERROR: Agent '{agent_id}' not found or is None for generate_response.", flush=True)
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found or invalid.")
     
     agent = agents[agent_id]
-    original_k = agent.memory.memory_retriever.k
-    
+    original_k = -1 
+    if hasattr(agent, 'memory') and hasattr(agent.memory, 'memory_retriever'):
+         original_k = agent.memory.memory_retriever.k
+    else:
+        print(f"WARN: Agent {agent_id} missing memory or retriever for k value backup in generate_response.", flush=True)
+
     try:
         if req.k is not None and req.k > 0:
-            agent.memory.memory_retriever.k = req.k
-        
+            if hasattr(agent, 'memory') and hasattr(agent.memory, 'memory_retriever'):
+                agent.memory.memory_retriever.k = req.k
+            else:
+                print(f"WARN: Cannot set k for agent {agent_id}; missing memory or retriever.", flush=True)
+
         prompt_is_important, response_text = agent.generate_dialogue_response(req.prompt.strip(), datetime.now())
     
     except Exception as e:
@@ -261,7 +298,7 @@ def generate_response(agent_id: str, req: GenerateResponseReq):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error during dialogue generation: {e}")
     finally:
-        if agent and hasattr(agent, 'memory') and hasattr(agent.memory, 'memory_retriever'): # Defensive check
+        if original_k != -1 and hasattr(agent, 'memory') and hasattr(agent.memory, 'memory_retriever'): 
             agent.memory.memory_retriever.k = original_k 
         
     return {
@@ -273,9 +310,9 @@ def generate_response(agent_id: str, req: GenerateResponseReq):
 @app.post("/agents/{agent_id}/add_memory")
 def add_memory(agent_id: str, req: AddMemoryReq):
     print(f"DEBUG: /add_memory for agent {agent_id} with text: '{req.text_to_memorize[:50]}...'", flush=True)
-    if agent_id not in agents:
-        print(f"ERROR: Agent '{agent_id}' not found for add_memory.", flush=True)
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
+    if agent_id not in agents or agents[agent_id] is None: # Added check for None instance
+        print(f"ERROR: Agent '{agent_id}' not found or is None for add_memory.", flush=True)
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found or invalid.")
     
     text_to_add = req.text_to_memorize.strip()
     if not text_to_add:
@@ -293,21 +330,28 @@ def add_memory(agent_id: str, req: AddMemoryReq):
 @app.post("/agents/{agent_id}/fetch_memories")
 def fetch_memories(agent_id: str, req: FetchMemoriesReq):
     print(f"DEBUG: /fetch_memories for agent {agent_id} with observation: '{req.observation[:50]}...'", flush=True)
-    if agent_id not in agents:
-        print(f"ERROR: Agent '{agent_id}' not found for fetch_memories.", flush=True)
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
+    if agent_id not in agents or agents[agent_id] is None: # Added check for None instance
+        print(f"ERROR: Agent '{agent_id}' not found or is None for fetch_memories.", flush=True)
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found or invalid.")
 
     observation = req.observation.strip()
     if not observation:
         raise HTTPException(status_code=400, detail="Observation text may not be empty for fetching memories.")
 
     agent = agents[agent_id]
-    original_k = agent.memory.memory_retriever.k
+    original_k = -1
+    if hasattr(agent, 'memory') and hasattr(agent.memory, 'memory_retriever'):
+        original_k = agent.memory.memory_retriever.k
+    else:
+        print(f"WARN: Agent {agent_id} missing memory or retriever for k value backup in fetch_memories.", flush=True)
     
     try:
         if req.k is not None and req.k > 0:
-            agent.memory.memory_retriever.k = req.k
-        
+            if hasattr(agent, 'memory') and hasattr(agent.memory, 'memory_retriever'):
+                agent.memory.memory_retriever.k = req.k
+            else:
+                print(f"WARN: Cannot set k for agent {agent_id}; missing memory or retriever.", flush=True)
+
         retrieved_docs: List[Document] = agent.memory.fetch_memories(observation, now=datetime.now())
         memories_content: List[str] = [doc.page_content for doc in retrieved_docs]
 
@@ -316,7 +360,7 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error fetching memories: {e}")
     finally:
-        if agent and hasattr(agent, 'memory') and hasattr(agent.memory, 'memory_retriever'): # Defensive check
+        if original_k != -1 and hasattr(agent, 'memory') and hasattr(agent.memory, 'memory_retriever'): 
              agent.memory.memory_retriever.k = original_k
         
     return {"memories": memories_content}
@@ -325,9 +369,9 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
 @app.get("/agents/{agent_id}/summary")
 def get_summary(agent_id: str): 
     print(f"DEBUG: /summary for agent {agent_id}", flush=True)
-    if agent_id not in agents:
-        print(f"ERROR: Agent '{agent_id}' not found for get_summary.", flush=True)
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
+    if agent_id not in agents or agents[agent_id] is None: # Added check for None instance
+        print(f"ERROR: Agent '{agent_id}' not found or is None for get_summary.", flush=True)
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found or invalid.")
     
     try:
         summary_text = agents[agent_id].get_summary(force_refresh=True)
@@ -341,7 +385,7 @@ def get_summary(agent_id: str):
 @app.delete("/agents/{agent_id}")
 def delete_agent(agent_id: str):
     print(f"DEBUG: /delete_agent for agent {agent_id}", flush=True)
-    if agent_id not in agents:
+    if agent_id not in agents: # No need to check for None here, just existence of key
         print(f"ERROR: Agent '{agent_id}' not found for delete_agent.", flush=True)
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
     
