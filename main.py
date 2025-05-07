@@ -4,6 +4,7 @@ from typing import Optional, Dict, List, Any, Tuple
 from uuid import uuid4
 import os
 import traceback
+import numpy as np # Ensure numpy is imported for potential normalization if needed elsewhere
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -12,12 +13,13 @@ import faiss
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
-from langchain.retrievers import TimeWeightedVectorStoreRetriever # Ensure this import is correct
+from langchain.retrievers import TimeWeightedVectorStoreRetriever
 from langchain_experimental.generative_agents import (
     GenerativeAgent,
     GenerativeAgentMemory,
 )
 from langchain_core.documents import Document
+from langchain_community.vectorstores.utils import DistanceStrategy # Import DistanceStrategy
 
 # ANSI Color Codes
 class BColors:
@@ -47,6 +49,10 @@ print(f"{BColors.OKGREEN}DEBUG: FastAPI application starting up...{BColors.ENDC}
 
 DEFAULT_CHAT_MODEL = "gpt-4o-mini"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small" 
+# For text-embedding-3-small, default dimension is 1536.
+# For text-embedding-ada-002, default dimension is 1536.
+# We will let OpenAIEmbeddings handle the default dimensions unless overridden.
+# Normalization will be handled by the FAISS wrapper.
 
 @app.get("/")
 async def health_check():
@@ -71,7 +77,6 @@ def _new_agent_instance(
     embedding_model_name: Optional[str] = None
 ) -> GenerativeAgent:
     print(f"{BColors.OKBLUE}DEBUG: _new_agent_instance called for agent '{BColors.BOLD}{name}{BColors.ENDC}{BColors.OKBLUE}'{BColors.ENDC}", flush=True)
-    # ... (rest of the function as you have it, with BColors for logging if desired) ...
     print(f"{BColors.DIM}  LLM Model Request: '{llm_model_name}', Embedding Model Request: '{embedding_model_name}'{BColors.ENDC}", flush=True)
     print(f"{BColors.DIM}  Input summary_refresh_seconds: {summary_refresh_seconds}, Input reflection_threshold: {reflection_threshold}{BColors.ENDC}", flush=True)
 
@@ -95,8 +100,10 @@ def _new_agent_instance(
     dim = 0 
     try:
         print(f"{BColors.DIM}DEBUG: Attempting to initialize OpenAIEmbeddings for agent '{name}' with model: {effective_embedding_model}{BColors.ENDC}", flush=True)
+        # We will use the default dimensions provided by the model.
+        # Normalization will be handled by the FAISS wrapper below.
         agent_embeddings = OpenAIEmbeddings(model=effective_embedding_model)
-        # It's good practice to embed a short string to get the embedding dimension
+        
         probe_for_dim = agent_embeddings.embed_query("get_dim_probe_for_agent")
         dim = len(probe_for_dim)
         print(f"{BColors.OKGREEN}DEBUG: OpenAIEmbeddings for agent '{name}' (model {effective_embedding_model}, dim {dim}) initialized and tested.{BColors.ENDC}", flush=True)
@@ -105,19 +112,24 @@ def _new_agent_instance(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to initialize/test embeddings with model '{effective_embedding_model}': {e}")
 
-    print(f"{BColors.DIM}DEBUG: Setting up FAISS index for agent '{name}' (dim: {dim})...{BColors.ENDC}", flush=True)
+    print(f"{BColors.DIM}DEBUG: Setting up FAISS index for agent '{name}' (dim: {dim}). Using Inner Product.{BColors.ENDC}", flush=True)
     try:
-        index = faiss.IndexFlatL2(dim)
+        # Use IndexFlatIP for Inner Product (cosine similarity with normalized vectors)
+        index = faiss.IndexFlatIP(dim) 
+        
         vectorstore = FAISS(
             embedding_function=agent_embeddings,
             index=index,
-            docstore=InMemoryDocstore({}), # Simple in-memory docstore
-            index_to_docstore_id={},    # Mapping from FAISS index to docstore ID
+            docstore=InMemoryDocstore({}), 
+            index_to_docstore_id={},    
+            normalize_L2=True,  # Crucial: Langchain FAISS wrapper will normalize embeddings
+            distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT # Scores will be (similarity + 1) / 2
+                                                                # which maps -1 to 1 range to 0 to 1
         )
         retriever = TimeWeightedVectorStoreRetriever(
-            vectorstore=vectorstore, k=15, decay_rate=0.01 # k here is default, can be overridden by requests
+            vectorstore=vectorstore, k=15, decay_rate=0.01 
         )
-        print(f"{BColors.OKGREEN}DEBUG: FAISS setup complete for agent '{name}'.{BColors.ENDC}", flush=True)
+        print(f"{BColors.OKGREEN}DEBUG: FAISS setup complete for agent '{name}'. (Index: IP, Normalize: True, Strategy: MAX_INNER_PRODUCT){BColors.ENDC}", flush=True)
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during FAISS setup for agent '{name}': {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
@@ -132,7 +144,6 @@ def _new_agent_instance(
             llm=agent_llm,
             memory_retriever=retriever,
             reflection_threshold=actual_reflect_for_memory, 
-            # verbose=verbose # Pass verbose to memory if it supports it, or handle logging around memory calls
         )
         print(f"{BColors.OKGREEN}DEBUG: GenerativeAgentMemory setup complete for agent '{name}'.{BColors.ENDC}", flush=True)
     except Exception as e:
@@ -149,11 +160,11 @@ def _new_agent_instance(
             name=name,
             age=age,
             traits=traits,
-            status=status, # Initial status
+            status=status, 
             memory=memory,
             llm=agent_llm,
             summary_refresh_seconds=actual_refresh_for_agent, 
-            verbose=verbose, # This controls LangChain's internal verbose logging for this agent
+            verbose=verbose, 
         )
         print(f"{BColors.OKGREEN}DEBUG: GenerativeAgent '{name}' initialized successfully.{BColors.ENDC}", flush=True)
         return agent
@@ -189,7 +200,6 @@ class FetchMemoriesReq(BaseModel):
     observation: str
     k: Optional[int] = Field(default=None, gt=0)
 
-# NEW: Pydantic Model for Update Status Request
 class UpdateStatusReq(BaseModel):
     new_status: str
 
@@ -242,6 +252,7 @@ def create_agent(req: CreateAgentReq):
             embedding_model_used = current_agent_instance.memory.memory_retriever.vectorstore.embedding_function.model
     else:
         print(f"{BColors.FAIL}ERROR: current_agent_instance is None after creation attempt for agent_id '{aid}'. This indicates a logic flaw.{BColors.ENDC}", flush=True)
+        # Attempt to retrieve if it was stored despite current_agent_instance being None locally
         if aid in agents and agents[aid] is not None: 
             retrieved_agent = agents[aid]
             if hasattr(retrieved_agent, 'llm') and retrieved_agent.llm and hasattr(retrieved_agent.llm, 'model_name'):
@@ -271,7 +282,7 @@ def list_agents():
 
         if agent_instance_from_dict: 
             agent_name_from_instance = agent_instance_from_dict.name
-            current_status = agent_instance_from_dict.status # Get current status
+            current_status = agent_instance_from_dict.status 
             if hasattr(agent_instance_from_dict, 'llm') and agent_instance_from_dict.llm and hasattr(agent_instance_from_dict.llm, 'model_name'):
                 llm_model = agent_instance_from_dict.llm.model_name
             
@@ -288,14 +299,13 @@ def list_agents():
         agent_details.append({
             "agent_id": agent_id, 
             "name": agent_name_from_instance, 
-            "status": current_status, # Include status in list
+            "status": current_status, 
             "llm_model": llm_model,
             "embedding_model": emb_model
         })
     print(f"{BColors.DIM}DEBUG: Returning {len(agent_details)} agents.{BColors.ENDC}", flush=True)
     return {"agents": agent_details}
 
-# NEW: Endpoint to update agent status
 @app.post("/agents/{agent_id}/update_status")
 def update_agent_status(agent_id: str, req: UpdateStatusReq):
     print(f"{BColors.HEADER}>>> Incoming Update Status Request for Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} <<<", flush=True)
@@ -308,7 +318,7 @@ def update_agent_status(agent_id: str, req: UpdateStatusReq):
     agent = agents[agent_id]
     
     try:
-        agent.status = req.new_status.strip() # Update the status attribute directly
+        agent.status = req.new_status.strip() 
         print(f"{BColors.OKGREEN}SUCCESS: Agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}' status updated to: '{agent.status}'{BColors.ENDC}", flush=True)
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error updating status for agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.FAIL}': {e}{BColors.ENDC}", flush=True)
@@ -341,7 +351,7 @@ def generate_response(agent_id: str, req: GenerateResponseReq):
             else:
                 print(f"{BColors.WARNING}WARN: Cannot set k for agent {agent_id}; retriever missing k attribute.{BColors.ENDC}", flush=True)
         
-        print(f"{BColors.DIM}Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.DIM} current status before generation: '{agent.status}'{BColors.ENDC}", flush=True) # Log current status
+        print(f"{BColors.DIM}Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.DIM} current status before generation: '{agent.status}'{BColors.ENDC}", flush=True)
         prompt_is_important, response_text = agent.generate_dialogue_response(req.prompt.strip(), datetime.now())
     
     except Exception as e:
@@ -401,7 +411,7 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
     if hasattr(retriever, 'k'):
         original_k = retriever.k
     
-    retrieved_docs_for_response: List[str] = []
+    retrieved_docs_for_response_payload: List[Dict[str, Any]] = [] # Changed to list of dicts
 
     try:
         if req.k is not None and req.k > 0:
@@ -410,30 +420,52 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
             else:
                 print(f"{BColors.WARNING}WARN: Cannot set k for agent {agent_id}; retriever does not have 'k' attribute.{BColors.ENDC}", flush=True)
 
-        retrieved_docs: List[Document] = agent.memory.fetch_memories(observation, now=datetime.now())
-        # This part depends on what your C++ client expects.
-        # If C++ expects an array of FHttpAgentMemoryEntry (with content and score):
-        # memories_to_return: List[Dict[str, Any]] = []
-        # for doc in retrieved_docs:
-        #     memories_to_return.append({
-        #         "content": doc.page_content,
-        #         "relevance_score": doc.metadata.get('importance', 0.0) # Using static importance
-        #     })
-        # retrieved_docs_for_response_payload = memories_to_return
+        # TimeWeightedVectorStoreRetriever returns List[Tuple[Document, float]] 
+        # where float is the combined score (recency, importance, relevance)
+        # However, agent.memory.fetch_memories calls _score_documents and returns List[Document]
+        # with 'relevance_score' potentially added to metadata if TimeWeightedRetriever does that.
+        # Let's check the source for fetch_memories in GenerativeAgentMemory.
+        # It calls self.memory_retriever.get_relevant_documents(observation, current_time=now)
+        # And TimeWeightedVectorStoreRetriever.get_relevant_documents returns List[Document]
+        # The scores used for the UserWarning are from vectorstore.similarity_search_with_relevance_scores
         
-        # If C++ client (as per your current .cpp for FetchMemories) can handle both strings and objects:
-        # For now, stick to returning list of strings as per the simpler C++ parsing path in FetchMemories
-        retrieved_docs_for_response_payload = [doc.page_content for doc in retrieved_docs]
+        # The C++ side expects FHttpAgentMemoryEntry (content, score)
+        # We need to get the relevance scores as calculated by the vectorstore.
+        # The agent.memory.fetch_memories() method doesn't directly return the raw scores from similarity_search_with_relevance_scores
+        # it returns Documents whose metadata *might* include 'relevance_score' if the retriever adds it.
+        # Let's directly use similarity_search_with_relevance_scores here if we need the scores for C++
+        
+        docs_and_scores: List[Tuple[Document, float]]
+        if hasattr(agent.memory.memory_retriever, "vectorstore") and \
+           hasattr(agent.memory.memory_retriever.vectorstore, "similarity_search_with_relevance_scores"):
+            print(f"{BColors.DIM}DEBUG: Fetching memories using similarity_search_with_relevance_scores for agent {agent_id}.{BColors.ENDC}", flush=True)
+            docs_and_scores = agent.memory.memory_retriever.vectorstore.similarity_search_with_relevance_scores(
+                observation, 
+                k=retriever.k if hasattr(retriever, 'k') else 15, # Use retriever's k
+                # filter=... if you have filters
+            )
+            # The scores from similarity_search_with_relevance_scores with MAX_INNER_PRODUCT and normalize_L2=True
+            # should now be in the 0-1 range.
+        else:
+            # Fallback if the specific method isn't available (should be for FAISS)
+            print(f"{BColors.WARNING}WARN: Using agent.memory.fetch_memories() for agent {agent_id}, scores might not be raw relevance scores.{BColors.ENDC}", flush=True)
+            retrieved_docs_only: List[Document] = agent.memory.fetch_memories(observation, now=datetime.now())
+            docs_and_scores = [(doc, doc.metadata.get('relevance_score', 0.0)) for doc in retrieved_docs_only] # Approximate
 
+        for doc, score in docs_and_scores:
+            retrieved_docs_for_response_payload.append({
+                "content": doc.page_content,
+                "relevance_score": score # This is the score from the vector store
+            })
 
-        # --- Enhanced Logging Block (already provided previously, ensure it's here) ---
+        # --- Enhanced Logging Block ---
         print(f"\n{BColors.OKBLUE}--- Detailed Fetched Memories (Agent: {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKBLUE}) ---{BColors.ENDC}", flush=True)
-        if not retrieved_docs:
+        if not docs_and_scores:
             print(f"{BColors.WARNING}No memories were fetched for this observation.{BColors.ENDC}", flush=True)
         else:
-            print(f"{BColors.DIM}Displaying {len(retrieved_docs)} fetched memories:{BColors.ENDC}", flush=True)
-            for i, doc in enumerate(retrieved_docs):
-                importance = doc.metadata.get('importance', 0.0)
+            print(f"{BColors.DIM}Displaying {len(docs_and_scores)} fetched memories:{BColors.ENDC}", flush=True)
+            for i, (doc, score) in enumerate(docs_and_scores): # Iterate through docs_and_scores
+                importance = doc.metadata.get('importance', 0.0) # Static importance
                 created_at_raw = doc.metadata.get('created_at')
                 last_accessed_at_raw = doc.metadata.get('last_accessed_at')
                 buffer_idx = doc.metadata.get('buffer_idx', 'N/A')
@@ -441,21 +473,26 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
                 created_at_str = created_at_raw.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at_raw, 'strftime') else str(created_at_raw)
                 last_accessed_at_str = last_accessed_at_raw.strftime("%Y-%m-%d %H:%M:%S") if hasattr(last_accessed_at_raw, 'strftime') else str(last_accessed_at_raw)
 
+                # Color for static importance
                 importance_color = BColors.IMPORTANCE_LOW
-                if importance >= 0.7:
-                    importance_color = BColors.IMPORTANCE_HIGH
-                elif importance >= 0.4:
-                    importance_color = BColors.IMPORTANCE_MEDIUM
+                if importance >= 0.7: importance_color = BColors.IMPORTANCE_HIGH
+                elif importance >= 0.4: importance_color = BColors.IMPORTANCE_MEDIUM
                 
+                # Color for relevance score (0-1 range expected)
+                relevance_color = BColors.IMPORTANCE_LOW
+                if score >= 0.7: relevance_color = BColors.IMPORTANCE_HIGH
+                elif score >= 0.4: relevance_color = BColors.IMPORTANCE_MEDIUM
+
                 print(f"{BColors.SEPARATOR}{'-'*70}{BColors.ENDC}", flush=True)
                 print(f"{BColors.BOLD}Memory #{i+1}:{BColors.ENDC}", flush=True)
+                print(f"  {BColors.METADATA_KEY}Relevance Score:{BColors.ENDC} {relevance_color}{score:.4f}{BColors.ENDC}", flush=True) # Display relevance score
                 print(f"  {BColors.METADATA_KEY}Static Importance:{BColors.ENDC} {importance_color}{importance:.3f}{BColors.ENDC}", flush=True)
                 print(f"  {BColors.METADATA_KEY}Content:{BColors.ENDC}\n{BColors.CONTENT_COLOR}    \"{doc.page_content.strip()}\"{BColors.ENDC}", flush=True)
                 print(f"  {BColors.DIM}{BColors.METADATA_KEY}Details:{BColors.ENDC}")
                 print(f"    {BColors.METADATA_KEY}Created At:{BColors.ENDC} {BColors.METADATA_VALUE}{created_at_str}{BColors.ENDC}", flush=True)
                 print(f"    {BColors.METADATA_KEY}Last Accessed:{BColors.ENDC} {BColors.METADATA_VALUE}{last_accessed_at_str}{BColors.ENDC}", flush=True)
                 print(f"    {BColors.METADATA_KEY}Buffer Idx:{BColors.ENDC} {BColors.METADATA_VALUE}{buffer_idx}{BColors.ENDC}", flush=True)
-        if retrieved_docs: # Add a final separator only if memories were printed
+        if docs_and_scores: 
             print(f"{BColors.SEPARATOR}{'-'*70}{BColors.ENDC}", flush=True)
         print(f"{BColors.OKBLUE}--- End of Detailed Fetched Memories ---{BColors.ENDC}\n", flush=True)
         # --- End of Enhanced Logging Block ---
@@ -481,7 +518,7 @@ def get_summary(agent_id: str):
         print(f"{BColors.FAIL}ERROR: Agent '{agent_id}' not found or is None for get_summary.{BColors.ENDC}", flush=True)
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found or invalid.")
     
-    summary_text = "Error generating summary." # Default in case of issues
+    summary_text = "Error generating summary." 
     try:
         summary_text = agents[agent_id].get_summary(force_refresh=True)
         print(f"{BColors.OKGREEN}DEBUG: Summary generated successfully for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}.{BColors.ENDC}", flush=True)
