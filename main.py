@@ -1,4 +1,4 @@
-# File: main.py
+# File: main.py (Reverted to Defaults)
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Tuple
 
@@ -16,16 +16,18 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain.retrievers import TimeWeightedVectorStoreRetriever
 from langchain_experimental.generative_agents import (
-    GenerativeAgent,
-    GenerativeAgentMemory,
+    GenerativeAgent, # Using BASE class
+    GenerativeAgentMemory, # Using BASE class
 )
 from langchain_core.documents import Document
 from langchain_community.vectorstores.utils import DistanceStrategy
-from langchain.prompts import PromptTemplate
-from langchain_core.language_models.base import BaseLanguageModel
-from langchain.chains.llm import LLMChain # Needed for the chain in memory and agent
+# Remove imports specifically needed only for overrides if they cause errors now
+# from langchain.prompts import PromptTemplate # May still be used by base classes
+# from langchain_core.language_models.base import BaseLanguageModel # May still be used by base classes
+# from langchain.chains.llm import LLMChain # May still be used by base classes
 
-# ANSI Color Codes
+
+# ANSI Color Codes (Keep for logging)
 class BColors:
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'
@@ -47,143 +49,12 @@ class BColors:
     CONTENT_COLOR = ENDC
     SEPARATOR = DIM
 
-app = FastAPI(title="Generative-Agent API (Refactored)")
+app = FastAPI(title="Generative-Agent API (Reverted to Defaults)")
 
-print(f"{BColors.OKGREEN}DEBUG: FastAPI application starting up...{BColors.ENDC}", flush=True)
+print(f"{BColors.OKGREEN}DEBUG: FastAPI application starting up... (Using Default Langchain Agents){BColors.ENDC}", flush=True)
 
 DEFAULT_CHAT_MODEL = "gpt-4o-mini"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
-
-# --- Custom Generative Agent Memory ---
-class CustomGenerativeAgentMemory(GenerativeAgentMemory):
-    def __init__(
-        self,
-        *,
-        llm: BaseLanguageModel,
-        memory_retriever: TimeWeightedVectorStoreRetriever,
-        verbose: bool = False,
-        reflection_threshold: Optional[float] = None,
-        **kwargs: Any,
-    ):
-        print(f"{BColors.HEADER}{BColors.BOLD}DEBUG_INIT: CustomGenerativeAgentMemory IS BEING INITIALIZED.{BColors.ENDC}", flush=True)
-        super().__init__(
-            llm=llm,
-            memory_retriever=memory_retriever,
-            verbose=verbose,
-            reflection_threshold=reflection_threshold,
-            **kwargs
-        )
-        self.verbose = verbose
-
-    def _get_summary_of_relevant_context(
-        self,
-        agent_name_alpha: str,
-        agent_name_beta: str,
-        observation: str,
-        now: Optional[datetime] = None,
-    ) -> str:
-        print(f"{BColors.OKBLUE}{BColors.BOLD}DEBUG_TRACE: CustomGenerativeAgentMemory._get_summary_of_relevant_context IS BEING CALLED for {agent_name_alpha} and {agent_name_beta}{BColors.ENDC}", flush=True)
-        print(f"{BColors.OKBLUE}DEBUG_TRACE: CustomMemory - Observation for _get_summary_of_relevant_context: {observation[:200]}...{BColors.ENDC}", flush=True)
-
-        relationship_query = f"{agent_name_alpha}'s relationship with {agent_name_beta}"
-        relevant_memories = self.fetch_memories(relationship_query, now=now)
-        relevant_memories_string = self.aggregate_memories(relevant_memories, prefix=False)
-        if not relevant_memories_string.strip():
-            relevant_memories_string = "No specific memories found regarding this entity."
-
-        prompt_template = PromptTemplate.from_template(
-            "You are an AI assistant analyzing the relationship between two entities based on a detailed observation and existing memories.\n\n"
-            "Current Detailed Observation of the Scene (focus on descriptions of entities involved):\n"
-            "\"\"\"\n{observation_text}\n\"\"\"\n\n"
-            "Agent Alpha: {agent_name_alpha}\n"
-            "Agent Beta (the other primary entity observed in the scene): {agent_name_beta}\n\n"
-            "Context from {agent_name_alpha}'s memory regarding any prior relationship, knowledge, or thoughts about {agent_name_beta}:\n"
-            "\"\"\"\n{relevant_memories}\n\"\"\"\n"
-            "(If these memories are empty or non-specific about {agent_name_beta}, it implies {agent_name_alpha} likely has no direct prior memory of {agent_name_beta} as described in the observation.)\n\n"
-            "Considering the \"Current Detailed Observation\" first and foremost, and then referencing {agent_name_alpha}'s memories, "
-            "what is the most likely current relationship between {agent_name_alpha} and {agent_name_beta} in the context of this specific scene? \n"
-            "Specifically:\n"
-            "1. Are they the same entity? (Compare their descriptions in the observation if both are detailed there, or {agent_name_alpha}'s known self-description vs. {agent_name_beta}'s observed description). List key differences if they are not the same.\n"
-            "2. If different entities, are they known to each other from the past, or are they strangers meeting now?\n\n"
-            "Provide a concise summary of this relationship analysis:\n"
-            "Relationship Summary:"
-        )
-        formatted_prompt_string = prompt_template.format(
-            agent_name_alpha=agent_name_alpha,
-            agent_name_beta=agent_name_beta,
-            observation_text=observation,
-            relevant_memories=relevant_memories_string
-        )
-        print(f"{BColors.OKBLUE}{BColors.BOLD}DEBUG_TRACE: CustomMemory - FULLY FORMATTED PROMPT for _get_summary_of_relevant_context chain:\n{formatted_prompt_string}{BColors.ENDC}", flush=True)
-        
-        result = self.chain.run(prompt=formatted_prompt_string, callbacks=self.callbacks)
-        print(f"{BColors.OKBLUE}{BColors.BOLD}DEBUG_TRACE: CustomMemory - RAW RESULT from _get_summary_of_relevant_context chain:\n{result}\n{BColors.ENDC}", flush=True)
-        return result
-# --- End of Custom Generative Agent Memory ---
-
-
-# --- Custom Generative Agent ---
-class CustomGenerativeAgent(GenerativeAgent):
-    def __init__(self, *, memory: CustomGenerativeAgentMemory, name: str, **kwargs: Any): # Added name for debug print
-        print(f"{BColors.HEADER}{BColors.BOLD}DEBUG_INIT: CustomGenerativeAgent IS BEING INITIALIZED for agent: {name}{BColors.ENDC}", flush=True)
-        super().__init__(memory=memory, name=name, **kwargs)
-
-    def _get_dialogue_observation_relevance(
-        self, observation: str, other_agent_name: str, now: Optional[datetime] = None
-    ) -> str:
-        print(f"{BColors.FAIL}{BColors.BOLD}DEBUG_TRACE: CustomGenerativeAgent._get_dialogue_observation_relevance IS BEING CALLED for {self.name} and {other_agent_name}{BColors.ENDC}", flush=True)
-        print(f"{BColors.FAIL}DEBUG_TRACE: CustomAgent - Observation for dialogue relevance: {observation[:200]}...{BColors.ENDC}", flush=True)
-
-        agent_alpha_self_description = self.status # Using current agent status
-
-        prompt_template = PromptTemplate.from_template(
-            "Task: Determine the relationship between Agent Alpha and an Observed Entity based *only* on the provided \"Full Current Observation\" and Alpha's known self-description. Then, check if any existing memories contradict this initial assessment.\n\n"
-            "Agent Alpha: {agent_name_alpha}\n"
-            "Agent Alpha's Known Self-Description (how Alpha currently presents himself to the world or his current state):\n"
-            "\"\"\"\n{agent_alpha_self_description}\n\"\"\"\n\n"
-            "Observed Entity (referred to as Agent Beta in this analysis): {other_agent_name}\n\n"
-            "Full Current Observation of the Scene (This is the primary source of truth for visual descriptions and immediate interactions):\n"
-            "\"\"\"\n{observation}\n\"\"\"\n\n"
-            "Instructions for Analysis:\n"
-            "Step 1: Visual Comparison based SOLELY on the \"Full Current Observation\" and Alpha's Self-Description.\n"
-            "   - Describe Agent Alpha's appearance as per his \"Known Self-Description\".\n"
-            "   - Describe the \"Observed Entity\" ({other_agent_name})'s appearance and actions *as detailed in the* \"Full Current Observation\".\n"
-            "   - Critical Question: Based *only* on these visual descriptions, are Agent Alpha and the Observed Entity the same person? Answer Yes or No.\n"
-            "   - If No, list at least three key visual/descriptive differences between Agent Alpha (from self-description) and the Observed Entity (from observation).\n"
-            "   - If they are different entities, does the \"Full Current Observation\" provide any clues about whether they know each other or if this is a first encounter? (e.g., signs of recognition, specific reactions).\n\n"
-            "Step 2: Consideration of Agent Alpha's Memories about {other_agent_name}.\n"
-            "   Memories of {agent_name_alpha} specifically about {other_agent_name}:\n"
-            "   \"\"\"\n{relevant_memories_string}\n\"\"\"\n"
-            "   - Do these memories (if any) confirm or contradict the assessment from Step 1? Be specific. If memories are general or not about {other_agent_name}, state that.\n\n"
-            "Step 3: Final Concise Relationship Summary for Dialogue Context.\n"
-            "   Based *primarily* on the visual evidence in the \"Full Current Observation\" (Step 1), and then secondarily on memories (Step 2), provide a very concise summary of the current relationship. Examples: 'They are strangers; Alpha is observing a new arrival.', 'They are the same person seen from a different perspective.', 'They are old acquaintances meeting again.', 'The observation does not describe Alpha, only a new entity.'\n\n"
-            "Concise Relationship and Context Summary:"
-        )
-        
-        agent_S_memories = self.memory.fetch_memories(
-            f"{self.name}'s relationship with {other_agent_name}", now=now
-        )
-        relevant_memories_string = "\n".join(
-            [memory.page_content for memory in agent_S_memories]
-        )
-        if not relevant_memories_string.strip():
-            relevant_memories_string = "No specific memories found regarding this entity."
-
-        formatted_prompt_string = prompt_template.format(
-            agent_name_alpha=self.name,
-            agent_alpha_self_description=agent_alpha_self_description,
-            other_agent_name=other_agent_name,
-            observation=observation,
-            relevant_memories_string=relevant_memories_string
-        )
-
-        print(f"{BColors.WARNING}{BColors.BOLD}DEBUG_TRACE: CustomAgent - FULLY FORMATTED PROMPT for _get_dialogue_observation_relevance chain:\n{formatted_prompt_string}{BColors.ENDC}", flush=True)
-
-        result = self.chain.run(prompt=formatted_prompt_string, callbacks=self.callbacks)
-        
-        print(f"{BColors.OKGREEN}{BColors.BOLD}DEBUG_TRACE: CustomAgent - RAW RESULT from _get_dialogue_observation_relevance chain:\n{result}\n{BColors.ENDC}", flush=True)
-        return result.strip()
-# --- End of Custom Generative Agent ---
 
 
 @app.get("/")
@@ -192,7 +63,7 @@ async def health_check():
     return {"status": "ok"}
 
 if not os.getenv("OPENAI_API_KEY"):
-    print(f"{BColors.FAIL}CRITICAL_WARNING: OPENAI_API_KEY environment variable is NOT SET. OpenAI calls will likely fail.{BColors.ENDC}", flush=True)
+    print(f"{BColors.FAIL}CRITICAL_WARNING: OPENAI_API_KEY environment variable is NOT SET. OpenAI calls likely fail.{BColors.ENDC}", flush=True)
 else:
     print(f"{BColors.OKGREEN}DEBUG: OPENAI_API_KEY environment variable is detected.{BColors.ENDC}", flush=True)
 
@@ -203,13 +74,15 @@ def _new_agent_instance(
     traits: str,
     status: str,
     summary_refresh_seconds: int,
-    reflection_threshold: int,
+    reflection_threshold: int, # Changed from Optional[float] to int to match your CreateAgentReq
     verbose: bool,
     llm_model_name: Optional[str] = None,
     embedding_model_name: Optional[str] = None
 ) -> GenerativeAgent:
-    print(f"{BColors.OKBLUE}DEBUG: _new_agent_instance called for agent '{BColors.BOLD}{name}{BColors.ENDC}{BColors.OKBLUE}'{BColors.ENDC}", flush=True)
-    # ... (rest of the LLM and Embedding setup remains the same) ...
+    print(f"{BColors.OKBLUE}DEBUG: _new_agent_instance called for agent '{BColors.BOLD}{name}{BColors.ENDC}{BColors.OKBLUE}' (Using Default Classes){BColors.ENDC}", flush=True)
+    print(f"{BColors.DIM}  LLM Model Request: '{llm_model_name}', Embedding Model Request: '{embedding_model_name}'{BColors.ENDC}", flush=True)
+    print(f"{BColors.DIM}  Input summary_refresh_seconds: {summary_refresh_seconds}, Input reflection_threshold: {reflection_threshold}{BColors.ENDC}", flush=True)
+
     effective_llm_model = llm_model_name if llm_model_name and llm_model_name.strip() else DEFAULT_CHAT_MODEL
     effective_embedding_model = embedding_model_name if embedding_model_name and embedding_model_name.strip() else DEFAULT_EMBEDDING_MODEL
 
@@ -259,63 +132,51 @@ def _new_agent_instance(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed during FAISS setup: {e}")
 
-    print(f"{BColors.DIM}DEBUG: Setting up CustomGenerativeAgentMemory for agent '{name}'...{BColors.ENDC}", flush=True)
+    print(f"{BColors.DIM}DEBUG: Setting up BASE GenerativeAgentMemory for agent '{name}'...{BColors.ENDC}", flush=True) # Using BASE
     try:
-        actual_reflect_for_memory = reflection_threshold if reflection_threshold > 0 else None
-        print(f"{BColors.DIM}DEBUG: actual_reflect_for_memory (for CustomGenerativeAgentMemory) will be: {actual_reflect_for_memory}{BColors.ENDC}", flush=True)
+        # Reflection threshold needs to be Optional[float] for base GenerativeAgentMemory
+        actual_reflect_for_memory = float(reflection_threshold) if reflection_threshold > 0 else None
+        print(f"{BColors.DIM}DEBUG: actual_reflect_for_memory (for BASE GenerativeAgentMemory) will be: {actual_reflect_for_memory}{BColors.ENDC}", flush=True)
 
-        memory_instance = CustomGenerativeAgentMemory(
+        memory_instance = GenerativeAgentMemory( # Using BASE class
             llm=agent_llm,
             memory_retriever=retriever,
             reflection_threshold=actual_reflect_for_memory,
-            verbose=verbose,
+            verbose=verbose, # Pass verbose to the memory class
+             # Other potential kwargs for base memory if needed
         )
-        print(f"{BColors.OKGREEN}DEBUG: CustomGenerativeAgentMemory setup complete for agent '{name}'.{BColors.ENDC}", flush=True)
+        print(f"{BColors.OKGREEN}DEBUG: BASE GenerativeAgentMemory setup complete for agent '{name}'.{BColors.ENDC}", flush=True) # Using BASE
     except Exception as e:
-        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during CustomGenerativeAgentMemory setup for agent '{name}': {e}{BColors.ENDC}", flush=True)
+        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during BASE GenerativeAgentMemory setup for agent '{name}': {e}{BColors.ENDC}", flush=True) # Using BASE
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed during CustomGenerativeAgentMemory setup: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed during BASE GenerativeAgentMemory setup: {e}") # Using BASE
 
-    print(f"{BColors.DIM}DEBUG: Initializing CustomGenerativeAgent '{name}'...{BColors.ENDC}", flush=True)
+    print(f"{BColors.DIM}DEBUG: Initializing BASE GenerativeAgent '{name}'...{BColors.ENDC}", flush=True) # Using BASE
     try:
         actual_refresh_for_agent = summary_refresh_seconds
-        print(f"{BColors.DIM}DEBUG: actual_refresh_for_agent (for CustomGenerativeAgent) will be: {actual_refresh_for_agent}{BColors.ENDC}", flush=True)
+        print(f"{BColors.DIM}DEBUG: actual_refresh_for_agent (for BASE GenerativeAgent) will be: {actual_refresh_for_agent}{BColors.ENDC}", flush=True)
 
-        # Pass all necessary kwargs from GenerativeAgent's __init__ signature
-        # Check GenerativeAgent source for full list if more are used/needed
-        agent = CustomGenerativeAgent(
+        agent = GenerativeAgent( # Using BASE class
             name=name,
             age=age,
             traits=traits,
             status=status,
-            memory=memory_instance,
+            memory=memory_instance, # Pass the BASE GenerativeAgentMemory instance
             llm=agent_llm,
             summary_refresh_seconds=actual_refresh_for_agent,
             verbose=verbose,
-            # Default values for other GenerativeAgent __init__ params if not passed:
-            # dialogue_llm=None, # Will default to llm
-            # max_tokens_for_summary=500, # Default in GenerativeAgent
-            # dialogue_prompt=None, # Will use default
-            # reflection_llm=None, # Will default to llm
-            # Chain_healing is specific to some chains, not a direct GenerativeAgent param.
-            # add_all_details_to_creations = False # default
-            # aggregate_reflection_related_memories = True #default
-            # max_reflection_thoughts = 50 # default
-            # relevant_memories_type = None # default
-            # k_relevant_memories_for_summary = 200 # default
         )
-        print(f"{BColors.OKGREEN}DEBUG: CustomGenerativeAgent '{name}' initialized successfully.{BColors.ENDC}", flush=True)
+        print(f"{BColors.OKGREEN}DEBUG: BASE GenerativeAgent '{name}' initialized successfully.{BColors.ENDC}", flush=True) # Using BASE
         return agent
     except Exception as e:
-        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during CustomGenerativeAgent initialization for agent '{name}': {e}{BColors.ENDC}", flush=True)
+        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during BASE GenerativeAgent initialization for agent '{name}': {e}{BColors.ENDC}", flush=True) # Using BASE
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed during CustomGenerativeAgent initialization: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed during BASE GenerativeAgent initialization: {e}") # Using BASE
 
 
 agents: Dict[str, GenerativeAgent] = {}
 
-# Pydantic Models
-# ... (No changes to Pydantic models: CreateAgentReq, GenerateResponseReq, etc.)
+# Pydantic Models (No changes needed)
 class CreateAgentReq(BaseModel):
     name: str
     age: int
@@ -323,7 +184,7 @@ class CreateAgentReq(BaseModel):
     status: str
     agent_id: Optional[str] = None
     summary_refresh_seconds: int = Field(default=0, ge=0)
-    reflection_threshold: int = Field(default=0, ge=0)
+    reflection_threshold: int = Field(default=0, ge=0) # Keep as int here for API input
     verbose: bool = False
     model_name: Optional[str] = None
     embedding_model_name: Optional[str] = None
@@ -343,8 +204,7 @@ class UpdateStatusReq(BaseModel):
     new_status: str
 
 
-# Endpoints
-# ... (No changes to endpoint implementations: /agents, /generate_response, etc.)
+# Endpoints (No changes needed in endpoint logic)
 @app.post("/agents", status_code=201)
 def create_agent(req: CreateAgentReq):
     print(f"{BColors.HEADER}DEBUG: /agents POST request received: {req.model_dump_json(exclude_none=True)}{BColors.ENDC}", flush=True)
@@ -362,7 +222,7 @@ def create_agent(req: CreateAgentReq):
             traits=req.traits,
             status=req.status,
             summary_refresh_seconds=req.summary_refresh_seconds,
-            reflection_threshold=req.reflection_threshold,
+            reflection_threshold=req.reflection_threshold, # Pass int
             verbose=req.verbose,
             llm_model_name=req.model_name,
             embedding_model_name=req.embedding_model_name
@@ -492,6 +352,7 @@ def generate_response(agent_id: str, req: GenerateResponseReq):
                 print(f"{BColors.WARNING}WARN: Cannot set k for agent {agent_id}; retriever missing k attribute.{BColors.ENDC}", flush=True)
 
         print(f"{BColors.DIM}Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.DIM} current status before generation: '{agent.status}'{BColors.ENDC}", flush=True)
+        # This will now use the BASE GenerativeAgent dialogue generation logic
         prompt_is_important, response_text = agent.generate_dialogue_response(req.prompt.strip(), datetime.now())
 
     except Exception as e:
@@ -657,4 +518,4 @@ def delete_agent(agent_id: str):
     print(f"{BColors.OKGREEN}DEBUG: Agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}' deleted successfully.{BColors.ENDC}", flush=True)
     return {"deleted_agent_id": agent_id, "status": "success"}
 
-print(f"{BColors.OKGREEN}DEBUG: FastAPI application finished loading.{BColors.ENDC}", flush=True)
+print(f"{BColors.OKGREEN}DEBUG: FastAPI application finished loading. (Using Default Langchain Agents){BColors.ENDC}", flush=True)
