@@ -65,6 +65,7 @@ class CustomGenerativeAgentMemory(GenerativeAgentMemory):
         reflection_threshold: Optional[float] = None,
         **kwargs: Any,
     ):
+        print(f"{BColors.HEADER}{BColors.BOLD}DEBUG_INIT: CustomGenerativeAgentMemory IS BEING INITIALIZED.{BColors.ENDC}", flush=True)
         super().__init__(
             llm=llm,
             memory_retriever=memory_retriever,
@@ -82,7 +83,7 @@ class CustomGenerativeAgentMemory(GenerativeAgentMemory):
         now: Optional[datetime] = None,
     ) -> str:
         print(f"{BColors.OKBLUE}{BColors.BOLD}DEBUG_TRACE: CustomGenerativeAgentMemory._get_summary_of_relevant_context IS BEING CALLED for {agent_name_alpha} and {agent_name_beta}{BColors.ENDC}", flush=True)
-        print(f"{BColors.OKBLUE}DEBUG_TRACE: CustomMemory - Observation: {observation[:200]}...{BColors.ENDC}", flush=True)
+        print(f"{BColors.OKBLUE}DEBUG_TRACE: CustomMemory - Observation for _get_summary_of_relevant_context: {observation[:200]}...{BColors.ENDC}", flush=True)
 
         relationship_query = f"{agent_name_alpha}'s relationship with {agent_name_beta}"
         relevant_memories = self.fetch_memories(relationship_query, now=now)
@@ -123,8 +124,9 @@ class CustomGenerativeAgentMemory(GenerativeAgentMemory):
 
 # --- Custom Generative Agent ---
 class CustomGenerativeAgent(GenerativeAgent):
-    def __init__(self, *, memory: CustomGenerativeAgentMemory, **kwargs: Any):
-        super().__init__(memory=memory, **kwargs)
+    def __init__(self, *, memory: CustomGenerativeAgentMemory, name: str, **kwargs: Any): # Added name for debug print
+        print(f"{BColors.HEADER}{BColors.BOLD}DEBUG_INIT: CustomGenerativeAgent IS BEING INITIALIZED for agent: {name}{BColors.ENDC}", flush=True)
+        super().__init__(memory=memory, name=name, **kwargs)
 
     def _get_dialogue_observation_relevance(
         self, observation: str, other_agent_name: str, now: Optional[datetime] = None
@@ -132,11 +134,7 @@ class CustomGenerativeAgent(GenerativeAgent):
         print(f"{BColors.FAIL}{BColors.BOLD}DEBUG_TRACE: CustomGenerativeAgent._get_dialogue_observation_relevance IS BEING CALLED for {self.name} and {other_agent_name}{BColors.ENDC}", flush=True)
         print(f"{BColors.FAIL}DEBUG_TRACE: CustomAgent - Observation for dialogue relevance: {observation[:200]}...{BColors.ENDC}", flush=True)
 
-        agent_alpha_self_description = self.status # Using current agent status as a proxy for self-description
-        # More robust: fetch a dedicated self-description if available, e.g., from a core characteristic memory
-        # For Havald, based on your setup, a more static one might be:
-        # agent_alpha_self_description = "Presents as an old man, frail and cloaked, moving slowly. Features deeply lined, profound sorrow and exhaustion. Quiet, observant, keeps to himself at a table near the hearth."
-
+        agent_alpha_self_description = self.status # Using current agent status
 
         prompt_template = PromptTemplate.from_template(
             "Task: Determine the relationship between Agent Alpha and an Observed Entity based *only* on the provided \"Full Current Observation\" and Alpha's known self-description. Then, check if any existing memories contradict this initial assessment.\n\n"
@@ -162,7 +160,6 @@ class CustomGenerativeAgent(GenerativeAgent):
             "Concise Relationship and Context Summary:"
         )
         
-        # Using self.memory which should be CustomGenerativeAgentMemory
         agent_S_memories = self.memory.fetch_memories(
             f"{self.name}'s relationship with {other_agent_name}", now=now
         )
@@ -212,9 +209,7 @@ def _new_agent_instance(
     embedding_model_name: Optional[str] = None
 ) -> GenerativeAgent:
     print(f"{BColors.OKBLUE}DEBUG: _new_agent_instance called for agent '{BColors.BOLD}{name}{BColors.ENDC}{BColors.OKBLUE}'{BColors.ENDC}", flush=True)
-    print(f"{BColors.DIM}  LLM Model Request: '{llm_model_name}', Embedding Model Request: '{embedding_model_name}'{BColors.ENDC}", flush=True)
-    print(f"{BColors.DIM}  Input summary_refresh_seconds: {summary_refresh_seconds}, Input reflection_threshold: {reflection_threshold}{BColors.ENDC}", flush=True)
-
+    # ... (rest of the LLM and Embedding setup remains the same) ...
     effective_llm_model = llm_model_name if llm_model_name and llm_model_name.strip() else DEFAULT_CHAT_MODEL
     effective_embedding_model = embedding_model_name if embedding_model_name and embedding_model_name.strip() else DEFAULT_EMBEDDING_MODEL
 
@@ -286,6 +281,8 @@ def _new_agent_instance(
         actual_refresh_for_agent = summary_refresh_seconds
         print(f"{BColors.DIM}DEBUG: actual_refresh_for_agent (for CustomGenerativeAgent) will be: {actual_refresh_for_agent}{BColors.ENDC}", flush=True)
 
+        # Pass all necessary kwargs from GenerativeAgent's __init__ signature
+        # Check GenerativeAgent source for full list if more are used/needed
         agent = CustomGenerativeAgent(
             name=name,
             age=age,
@@ -295,6 +292,17 @@ def _new_agent_instance(
             llm=agent_llm,
             summary_refresh_seconds=actual_refresh_for_agent,
             verbose=verbose,
+            # Default values for other GenerativeAgent __init__ params if not passed:
+            # dialogue_llm=None, # Will default to llm
+            # max_tokens_for_summary=500, # Default in GenerativeAgent
+            # dialogue_prompt=None, # Will use default
+            # reflection_llm=None, # Will default to llm
+            # Chain_healing is specific to some chains, not a direct GenerativeAgent param.
+            # add_all_details_to_creations = False # default
+            # aggregate_reflection_related_memories = True #default
+            # max_reflection_thoughts = 50 # default
+            # relevant_memories_type = None # default
+            # k_relevant_memories_for_summary = 200 # default
         )
         print(f"{BColors.OKGREEN}DEBUG: CustomGenerativeAgent '{name}' initialized successfully.{BColors.ENDC}", flush=True)
         return agent
@@ -307,6 +315,7 @@ def _new_agent_instance(
 agents: Dict[str, GenerativeAgent] = {}
 
 # Pydantic Models
+# ... (No changes to Pydantic models: CreateAgentReq, GenerateResponseReq, etc.)
 class CreateAgentReq(BaseModel):
     name: str
     age: int
@@ -333,7 +342,9 @@ class FetchMemoriesReq(BaseModel):
 class UpdateStatusReq(BaseModel):
     new_status: str
 
+
 # Endpoints
+# ... (No changes to endpoint implementations: /agents, /generate_response, etc.)
 @app.post("/agents", status_code=201)
 def create_agent(req: CreateAgentReq):
     print(f"{BColors.HEADER}DEBUG: /agents POST request received: {req.model_dump_json(exclude_none=True)}{BColors.ENDC}", flush=True)
