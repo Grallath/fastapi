@@ -23,7 +23,7 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores.utils import DistanceStrategy
 from langchain.prompts import PromptTemplate
 from langchain_core.language_models.base import BaseLanguageModel
-from langchain.chains.llm import LLMChain # Needed for the chain in memory
+from langchain.chains.llm import LLMChain # Needed for the chain in memory and agent
 
 # ANSI Color Codes
 class BColors:
@@ -63,48 +63,33 @@ class CustomGenerativeAgentMemory(GenerativeAgentMemory):
         memory_retriever: TimeWeightedVectorStoreRetriever,
         verbose: bool = False,
         reflection_threshold: Optional[float] = None,
-        # Add crucial_importance_threshold if you use it, or other specific kwargs
-        **kwargs: Any, # Catches other potential kwargs like 'callbacks'
+        **kwargs: Any,
     ):
         super().__init__(
             llm=llm,
             memory_retriever=memory_retriever,
-            verbose=verbose, # Pass verbose to the base class for its chains
+            verbose=verbose,
             reflection_threshold=reflection_threshold,
-            **kwargs # Pass through any other relevant args
+            **kwargs
         )
-        self.verbose = verbose # Store for local use if needed
-        # Re-initialize self.chain with the correct llm and verbose setting
-        # The base class initializes self.chain with a dummy prompt "{prompt}"
-        # We will use this existing chain but provide it a fully formatted prompt string.
-        # If you needed a different prompt structure for self.chain itself, you'd redefine it here.
-        # For this fix, we only need to ensure we're passing the correct input to self.chain.run()
-
+        self.verbose = verbose
 
     def _get_summary_of_relevant_context(
         self,
         agent_name_alpha: str,
         agent_name_beta: str,
-        observation: str, # This is the full observation text
+        observation: str,
         now: Optional[datetime] = None,
     ) -> str:
-        """Summarize the relevant context of observations for an agent, with explicit observation."""
-        # if self.verbose: # For debugging this specific method entry
-        #     print(f"{BColors.OKCYAN}DEBUG (CustomMemory): _get_summary_of_relevant_context called for {agent_name_alpha} and {agent_name_beta}{BColors.ENDC}", flush=True)
+        # if self.verbose:
+        #     print(f"{BColors.OKCYAN}DEBUG (CustomMemory): _get_summary_of_relevant_context for {agent_name_alpha} & {agent_name_beta}{BColors.ENDC}", flush=True)
         #     print(f"{BColors.DIM}DEBUG (CustomMemory): Observation: {observation[:100]}...{BColors.ENDC}", flush=True)
 
         relationship_query = f"{agent_name_alpha}'s relationship with {agent_name_beta}"
         relevant_memories = self.fetch_memories(relationship_query, now=now)
+        relevant_memories_string = self.aggregate_memories(relevant_memories, prefix=False)
 
-        relevant_memories_string = self.aggregate_memories(
-            relevant_memories, prefix=False
-        )
-        # if self.verbose: # For debugging memories
-        #     print(f"{BColors.DIM}DEBUG (CustomMemory): Relevant memories string for relationship: {relevant_memories_string[:200]}...{BColors.ENDC}", flush=True)
-
-
-        # THE MODIFIED PROMPT TEMPLATE
-        prompt_template = PromptTemplate.from_template( # Renamed to prompt_template to avoid clash
+        prompt_template = PromptTemplate.from_template(
             "You are an AI assistant analyzing the relationship between two entities based on a detailed observation and existing memories.\n\n"
             "Current Detailed Observation of the Scene (focus on descriptions of entities involved):\n"
             "\"\"\"\n{observation_text}\n\"\"\"\n\n"
@@ -121,28 +106,87 @@ class CustomGenerativeAgentMemory(GenerativeAgentMemory):
             "Provide a concise summary of this relationship analysis:\n"
             "Relationship Summary:"
         )
-
-        # Format your detailed prompt template first
         formatted_prompt_string = prompt_template.format(
             agent_name_alpha=agent_name_alpha,
             agent_name_beta=agent_name_beta,
-            observation_text=observation, # Pass the observation here
+            observation_text=observation,
             relevant_memories=relevant_memories_string
         )
-
-        # if self.verbose: # Add this for debugging the fully formatted prompt
-        #     print(f"{BColors.OKCYAN}DEBUG (CustomMemory): Fully Formatted Prompt for Relationship Chain:\n{formatted_prompt_string}{BColors.ENDC}", flush=True)
-
-        # self.chain is an LLMChain initialized in the base class constructor
-        # Its prompt template is just "{prompt}" and it expects one input variable 'prompt'.
-        result = self.chain.run(
-            prompt=formatted_prompt_string, # Pass the fully formatted string here
-            callbacks=self.callbacks, # Pass callbacks if used by the chain
-        )
-        # if self.verbose: # For debugging the result
+        # if self.verbose:
+        #     print(f"{BColors.OKCYAN}DEBUG (CustomMemory): FULLY FORMATTED PROMPT for relationship chain:\n{formatted_prompt_string}{BColors.ENDC}", flush=True)
+        
+        result = self.chain.run(prompt=formatted_prompt_string, callbacks=self.callbacks)
+        # if self.verbose:
         #     print(f"{BColors.OKBLUE}DEBUG (CustomMemory): Relationship summary result: {result}{BColors.ENDC}", flush=True)
         return result
 # --- End of Custom Generative Agent Memory ---
+
+
+# --- Custom Generative Agent ---
+class CustomGenerativeAgent(GenerativeAgent):
+    def __init__(self, *, memory: CustomGenerativeAgentMemory, **kwargs: Any): # Ensure memory is Custom type
+        super().__init__(memory=memory, **kwargs)
+        # self.memory is already typed as GenerativeAgentMemory in base,
+        # but we know it's CustomGenerativeAgentMemory if we ensure it during init.
+        # No need to re-declare self.memory if its interface is compatible.
+        # self.verbose is inherited from GenerativeAgent's __init__
+
+    def _get_dialogue_observation_relevance(
+        self, observation: str, other_agent_name: str, now: Optional[datetime] = None
+    ) -> str:
+        """
+        Return a summary of the agent's A's memories of agent B,
+        modified to include the current observation directly for better context.
+        """
+        # if self.verbose:
+        #     print(f"{BColors.OKCYAN}DEBUG (CustomAgent): _get_dialogue_observation_relevance called for {self.name} and {other_agent_name}{BColors.ENDC}", flush=True)
+        #     print(f"{BColors.DIM}DEBUG (CustomAgent): Observation for dialogue relevance: {observation[:100]}...{BColors.ENDC}", flush=True)
+
+        prompt_template = PromptTemplate.from_template( # Renamed to prompt_template
+            "You are an AI assistant analyzing the relevance of an observation to an agent's relationship with another entity, considering past memories and the current detailed scene.\n\n"
+            "Current Agent (Alpha): {agent_name_alpha}\n"
+            "Other Entity (Beta) mentioned in/central to the observation: {other_agent_name}\n\n"
+            "Full Current Observation of the Scene:\n"
+            "\"\"\"\n{observation}\n\"\"\"\n\n"
+            "What is the relationship between {agent_name_alpha} and {other_agent_name} based *primarily* on the details in the \"Full Current Observation\"?\n"
+            "Consider:\n"
+            "1. Are they the same entity? (Compare Alpha's known self-description with Beta's observed description in the observation). List key differences if not the same.\n"
+            "2. If different entities, based on the observation, do they appear to know each other, or is this a new encounter?\n\n"
+            "Now, also consider memories {agent_name_alpha} has about {other_agent_name} (if any exist and are provided below).\n"
+            "Memories of {agent_name_alpha} about {other_agent_name}:\n"
+            "\"\"\"\n{relevant_memories_string}\n\"\"\"\n"
+            "(If these memories are empty or non-specific, it strongly implies no prior significant remembered relationship.)\n\n"
+            "Synthesize all of this into a concise summary of the current relationship and context between {agent_name_alpha} and {other_agent_name} in light of the observation.\n"
+            "Focus on what is directly evident or strongly implied by the observation first, then supplement with memories if they are relevant and non-contradictory to the immediate scene.\n\n"
+            "Concise Relationship and Context Summary:"
+        )
+        
+        # Ensure self.memory is used, which should be CustomGenerativeAgentMemory
+        agent_S_memories = self.memory.fetch_memories(
+            f"{self.name}'s relationship with {other_agent_name}", now=now
+        )
+        relevant_memories_string = "\n".join(
+            [memory.page_content for memory in agent_S_memories]
+        )
+
+        formatted_prompt_string = prompt_template.format(
+            agent_name_alpha=self.name,
+            other_agent_name=other_agent_name,
+            observation=observation,
+            relevant_memories_string=relevant_memories_string
+        )
+
+        # if self.verbose:
+        #     print(f"{BColors.OKCYAN}DEBUG (CustomAgent): FULLY FORMATTED PROMPT for dialogue relevance chain:\n{formatted_prompt_string}{BColors.ENDC}", flush=True)
+
+        # self.chain is an LLMChain initialized in GenerativeAgent's __init__
+        # Its prompt template is just "{prompt}" and it expects one input variable 'prompt'.
+        result = self.chain.run(prompt=formatted_prompt_string, callbacks=self.callbacks)
+        
+        # if self.verbose:
+        #     print(f"{BColors.OKBLUE}DEBUG (CustomAgent): Dialogue relevance result: {result}{BColors.ENDC}", flush=True)
+        return result.strip()
+# --- End of Custom Generative Agent ---
 
 
 @app.get("/")
@@ -166,7 +210,7 @@ def _new_agent_instance(
     verbose: bool,
     llm_model_name: Optional[str] = None,
     embedding_model_name: Optional[str] = None
-) -> GenerativeAgent:
+) -> GenerativeAgent: # Return type is base, but instance will be Custom
     print(f"{BColors.OKBLUE}DEBUG: _new_agent_instance called for agent '{BColors.BOLD}{name}{BColors.ENDC}{BColors.OKBLUE}'{BColors.ENDC}", flush=True)
     print(f"{BColors.DIM}  LLM Model Request: '{llm_model_name}', Embedding Model Request: '{embedding_model_name}'{BColors.ENDC}", flush=True)
     print(f"{BColors.DIM}  Input summary_refresh_seconds: {summary_refresh_seconds}, Input reflection_threshold: {reflection_threshold}{BColors.ENDC}", flush=True)
@@ -225,7 +269,7 @@ def _new_agent_instance(
         actual_reflect_for_memory = reflection_threshold if reflection_threshold > 0 else None
         print(f"{BColors.DIM}DEBUG: actual_reflect_for_memory (for CustomGenerativeAgentMemory) will be: {actual_reflect_for_memory}{BColors.ENDC}", flush=True)
 
-        memory = CustomGenerativeAgentMemory(
+        memory_instance = CustomGenerativeAgentMemory( # Changed variable name for clarity
             llm=agent_llm,
             memory_retriever=retriever,
             reflection_threshold=actual_reflect_for_memory,
@@ -237,30 +281,31 @@ def _new_agent_instance(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed during CustomGenerativeAgentMemory setup: {e}")
 
-    print(f"{BColors.DIM}DEBUG: Initializing GenerativeAgent '{name}'...{BColors.ENDC}", flush=True)
+    print(f"{BColors.DIM}DEBUG: Initializing CustomGenerativeAgent '{name}'...{BColors.ENDC}", flush=True) # MODIFIED
     try:
         actual_refresh_for_agent = summary_refresh_seconds
-        print(f"{BColors.DIM}DEBUG: actual_refresh_for_agent (for GenerativeAgent) will be: {actual_refresh_for_agent}{BColors.ENDC}", flush=True)
+        print(f"{BColors.DIM}DEBUG: actual_refresh_for_agent (for CustomGenerativeAgent) will be: {actual_refresh_for_agent}{BColors.ENDC}", flush=True)
 
-        agent = GenerativeAgent(
+        agent = CustomGenerativeAgent( # MODIFIED HERE
             name=name,
             age=age,
             traits=traits,
             status=status,
-            memory=memory,
+            memory=memory_instance, # Pass the CustomGenerativeAgentMemory instance
             llm=agent_llm,
             summary_refresh_seconds=actual_refresh_for_agent,
             verbose=verbose,
+            # token_healing=False, # Example: Pass other GenerativeAgent params if needed
         )
-        print(f"{BColors.OKGREEN}DEBUG: GenerativeAgent '{name}' initialized successfully.{BColors.ENDC}", flush=True)
+        print(f"{BColors.OKGREEN}DEBUG: CustomGenerativeAgent '{name}' initialized successfully.{BColors.ENDC}", flush=True) # MODIFIED
         return agent
     except Exception as e:
-        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during GenerativeAgent initialization for agent '{name}': {e}{BColors.ENDC}", flush=True)
+        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during CustomGenerativeAgent initialization for agent '{name}': {e}{BColors.ENDC}", flush=True) # MODIFIED
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed during GenerativeAgent initialization: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed during CustomGenerativeAgent initialization: {e}")
 
 
-agents: Dict[str, GenerativeAgent] = {}
+agents: Dict[str, GenerativeAgent] = {} # Store as base type, actual instances are Custom
 
 # Pydantic Models
 class CreateAgentReq(BaseModel):
@@ -423,6 +468,7 @@ def generate_response(agent_id: str, req: GenerateResponseReq):
 
     agent = agents[agent_id]
     original_k = -1
+    # Access retriever through agent.memory, which should be CustomGenerativeAgentMemory
     retriever = agent.memory.memory_retriever
     if hasattr(retriever, 'k'):
          original_k = retriever.k
@@ -466,6 +512,7 @@ def add_memory(agent_id: str, req: AddMemoryReq):
         raise HTTPException(status_code=400, detail="Memory text may not be empty.")
 
     try:
+        # Access memory through agent.memory
         agents[agent_id].memory.add_memory(text_to_add, now=datetime.now())
         print(f"{BColors.OKGREEN}DEBUG: Memory added successfully for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}.{BColors.ENDC}", flush=True)
     except Exception as e:
@@ -582,6 +629,7 @@ def get_summary(agent_id: str):
 
     summary_text = "Error generating summary."
     try:
+        # Access summary through agent.get_summary()
         summary_text = agents[agent_id].get_summary(force_refresh=True)
         print(f"{BColors.OKGREEN}DEBUG: Summary generated successfully for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}.{BColors.ENDC}", flush=True)
     except Exception as e:
