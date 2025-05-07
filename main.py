@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import Optional, Dict
 from uuid import uuid4
+from math import inf
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -24,6 +25,7 @@ async def health_check():
     return {"status": "ok"}
 
 # ——— shared LLM & embeddings ——————————————————
+
 llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.7)
 emb = OpenAIEmbeddings()
 
@@ -36,10 +38,11 @@ def _new_agent_instance(
     reflection_threshold: int,
     verbose: bool
 ) -> GenerativeAgent:
-    # 1) probe embedding size
+    # Probe embedding size
     probe = emb.embed_query("probe")
     dim = len(probe)
-    # 2) make empty FAISS
+
+    # Build an empty FAISS index
     index = faiss.IndexFlatL2(dim)
     vectorstore = FAISS(
         embedding_function=emb,
@@ -47,18 +50,24 @@ def _new_agent_instance(
         docstore=InMemoryDocstore({}),
         index_to_docstore_id={},
     )
-    # 3) time‐weighted retriever
+
+    # Time‐weighted retriever
     retriever = TimeWeightedVectorStoreRetriever(
         vectorstore=vectorstore, k=15, decay_rate=0.01
     )
-    # 4) interpret 0 → never auto-reflect
-    actual_threshold = reflection_threshold if reflection_threshold > 0 else float("inf")
+
+    # reflection_threshold: 0 → never; else as given
+    actual_reflect = reflection_threshold if reflection_threshold > 0 else inf
+
+    # summary_refresh_seconds: 0 → never; else as given
+    actual_refresh = summary_refresh_seconds if summary_refresh_seconds > 0 else inf
+
     memory = GenerativeAgentMemory(
         llm=llm,
         memory_retriever=retriever,
-        reflection_threshold=actual_threshold,
+        reflection_threshold=actual_reflect,
     )
-    # 5) build the agent
+
     agent = GenerativeAgent(
         name=name,
         age=age,
@@ -66,7 +75,7 @@ def _new_agent_instance(
         status=status,
         memory=memory,
         llm=llm,
-        summary_refresh_seconds=summary_refresh_seconds,
+        summary_refresh_seconds=actual_refresh,
         verbose=verbose,
     )
     return agent
@@ -74,6 +83,7 @@ def _new_agent_instance(
 agents: Dict[str, GenerativeAgent] = {}
 
 # ——— Pydantic models ———————————————————————————————
+
 class CreateAgentReq(BaseModel):
     name: str
     age: int
@@ -122,13 +132,17 @@ def talk(agent_id: str, req: TalkReq):
     if not text:
         raise HTTPException(400, "Prompt may not be empty")
     agent = agents[agent_id]
-    # temporarily override top-k
+
+    # override top-k if provided
     if req.k is not None:
         agent.memory.memory_retriever.k = req.k
+
     should_write, response = agent.generate_dialogue_response(text, datetime.now())
-    # only write into memory if explicitly desired
+
+    # only write into memory if desired
     if req.write_memory and should_write:
         agent.memory.add_memory(text)
+
     return {"agent": agent.name, "response": response}
 
 @app.post("/agents/{agent_id}/observe")
