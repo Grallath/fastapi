@@ -1,9 +1,8 @@
 from datetime import datetime
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple # Added Tuple
 from uuid import uuid4
-# from math import inf # No longer needed for these parameters
-import os 
-import traceback 
+import os
+import traceback
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -12,13 +11,35 @@ import faiss
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
-from langchain.retrievers import TimeWeightedVectorStoreRetriever
+from langchain.retrievers import TimeWeightedVectorStoreRetriever # Ensure this is the correct import
 from langchain_experimental.generative_agents import (
     GenerativeAgent,
     GenerativeAgentMemory,
 )
 from langchain_core.documents import Document
 
+# ANSI Color Codes
+class BColors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    DIM = '\033[2m'
+
+    # Custom colors for scores/importance
+    IMPORTANCE_HIGH = OKGREEN
+    IMPORTANCE_MEDIUM = WARNING # Yellow
+    IMPORTANCE_LOW = FAIL # Red
+    
+    METADATA_KEY = OKCYAN
+    METADATA_VALUE = OKBLUE
+    CONTENT_COLOR = ENDC # Default color for main content
+    SEPARATOR = DIM # Dim color for separators
 
 app = FastAPI(title="Generative-Agent API (Refactored)")
 
