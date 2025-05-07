@@ -1,5 +1,3 @@
-# main.py
-
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from uuid import uuid4
@@ -26,10 +24,9 @@ app = FastAPI(title="Generative-Agent API (Refactored)")
 async def health_check():
     return {"status": "ok"}
 
-# ——— shared LLM & embeddings ——————————————————
+# ——— shared embeddings (LLM is now per-agent) ——————————————————
 
-llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.7) # Consider making model configurable
-emb = OpenAIEmbeddings()
+emb = OpenAIEmbeddings() # Embeddings can remain global if they are model-agnostic or a single type is used
 
 def _new_agent_instance(
     name: str,
@@ -38,33 +35,48 @@ def _new_agent_instance(
     status: str,
     summary_refresh_seconds: int,
     reflection_threshold: int,
-    verbose: bool
+    verbose: bool,
+    model_name: Optional[str] = None # NEW: model_name parameter
 ) -> GenerativeAgent:
+    
+    # Determine which model to use, default if not provided or empty
+    effective_model_name = model_name if model_name and model_name.strip() else "gpt-4o-mini"
+
+    # Create LLM instance here, specific to this agent
+    # Temperature is still hardcoded here; could also be a parameter if needed
     try:
-        probe = emb.embed_query("probe")
+        agent_llm = ChatOpenAI(model_name=effective_model_name, temperature=0.7)
     except Exception as e:
-        # Handle potential issues with OpenAI API key or connectivity early
+        # This could happen if the model_name is invalid or API key issues for that model
+        raise HTTPException(status_code=500, detail=f"Failed to initialize LLM with model '{effective_model_name}': {e}")
+
+    # Embedding probe can remain similar
+    try:
+        probe = emb.embed_query("probe_query_for_dimension_check") # Use a consistent probe string
+    except Exception as e:
+        # Handle potential issues with OpenAI API key or connectivity for embeddings
         raise HTTPException(status_code=500, detail=f"Failed to get embedding dimension: {e}")
 
     dim = len(probe)
 
+    # Vectorstore setup remains the same, using the global 'emb'
     index = faiss.IndexFlatL2(dim)
     vectorstore = FAISS(
-        embedding_function=emb,
+        embedding_function=emb, # Global embedding function
         index=index,
         docstore=InMemoryDocstore({}),
         index_to_docstore_id={},
     )
 
     retriever = TimeWeightedVectorStoreRetriever(
-        vectorstore=vectorstore, k=15, decay_rate=0.01 # Default k
+        vectorstore=vectorstore, k=15, decay_rate=0.01 # Default k for retriever
     )
 
     actual_reflect = reflection_threshold if reflection_threshold > 0 else inf
     actual_refresh = summary_refresh_seconds if summary_refresh_seconds > 0 else inf
 
     memory = GenerativeAgentMemory(
-        llm=llm,
+        llm=agent_llm, # Pass the agent-specific LLM
         memory_retriever=retriever,
         reflection_threshold=actual_reflect,
         # verbose=verbose, # verbose in GenerativeAgentMemory is for logging reflections
@@ -76,7 +88,7 @@ def _new_agent_instance(
         traits=traits,
         status=status,
         memory=memory,
-        llm=llm,
+        llm=agent_llm, # Pass the agent-specific LLM
         summary_refresh_seconds=actual_refresh,
         verbose=verbose, # verbose in GenerativeAgent is for general logging
     )
@@ -95,17 +107,18 @@ class CreateAgentReq(BaseModel):
     summary_refresh_seconds: int = Field(default=0, ge=0) # 0 → never
     reflection_threshold: int = Field(default=0, ge=0)   # 0 → never
     verbose: bool = False
+    model_name: Optional[str] = None # NEW: Optional model_name field
 
 class GenerateResponseReq(BaseModel):
     prompt: str
-    k: Optional[int] = Field(default=None, gt=0) # If None or 0, uses agent's default k
+    k: Optional[int] = Field(default=None, gt=0) 
 
 class AddMemoryReq(BaseModel):
     text_to_memorize: str
 
 class FetchMemoriesReq(BaseModel):
     observation: str
-    k: Optional[int] = Field(default=None, gt=0) # If None or 0, uses agent's default k
+    k: Optional[int] = Field(default=None, gt=0)
 
 # ——— Endpoints ———————————————————————————————————————
 
@@ -124,16 +137,36 @@ def create_agent(req: CreateAgentReq):
             summary_refresh_seconds=req.summary_refresh_seconds,
             reflection_threshold=req.reflection_threshold,
             verbose=req.verbose,
+            model_name=req.model_name # Pass model_name from request
         )
-    except Exception as e:
-        # Catch errors during agent initialization (e.g., OpenAI API issues)
-        raise HTTPException(status_code=500, detail=f"Failed to initialize agent: {e}")
+    except HTTPException as e: # Re-raise HTTPExceptions from _new_agent_instance
+        raise e
+    except Exception as e: # Catch other unexpected errors during agent initialization
+        raise HTTPException(status_code=500, detail=f"Unexpected error during agent initialization: {e}")
         
-    return {"agent_id": aid, "name": req.name}
+    # Access the model_name from the llm instance associated with the created agent
+    # The specific attribute depends on the Langchain LLM wrapper, for ChatOpenAI it's .model_name
+    model_actually_used = "unknown"
+    if hasattr(agents[aid].llm, 'model_name'):
+        model_actually_used = agents[aid].llm.model_name
+    elif hasattr(agents[aid].llm, 'model'): # some wrappers might use 'model'
+         model_actually_used = agents[aid].llm.model
+
+
+    return {"agent_id": aid, "name": req.name, "model_used": model_actually_used}
 
 @app.get("/agents")
 def list_agents():
-    return {"agents": list(agents.keys())}
+    agent_details = []
+    for agent_id, agent_instance in agents.items():
+        model_used = "unknown"
+        if hasattr(agent_instance.llm, 'model_name'):
+            model_used = agent_instance.llm.model_name
+        elif hasattr(agent_instance.llm, 'model'):
+            model_used = agent_instance.llm.model
+        agent_details.append({"agent_id": agent_id, "name": agent_instance.name, "model": model_used})
+    return {"agents": agent_details}
+
 
 @app.post("/agents/{agent_id}/generate_response")
 def generate_response(agent_id: str, req: GenerateResponseReq):
@@ -151,13 +184,11 @@ def generate_response(agent_id: str, req: GenerateResponseReq):
         if req.k is not None and req.k > 0:
             agent.memory.memory_retriever.k = req.k
         
-        # generate_dialogue_response returns: (Boolean indicating if observation should be added to memory, String response)
         prompt_is_important, response_text = agent.generate_dialogue_response(text, datetime.now())
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during dialogue generation: {e}")
     finally:
-        # Restore original k value for the agent's retriever
         agent.memory.memory_retriever.k = original_k
         
     return {
@@ -198,21 +229,19 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
         if req.k is not None and req.k > 0:
             agent.memory.memory_retriever.k = req.k
         
-        # fetch_memories returns List[Document]
         retrieved_docs: List[Document] = agent.memory.fetch_memories(observation, now=datetime.now())
         memories_content: List[str] = [doc.page_content for doc in retrieved_docs]
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching memories: {e}")
     finally:
-        # Restore original k value
         agent.memory.memory_retriever.k = original_k
         
     return {"memories": memories_content}
 
 
 @app.get("/agents/{agent_id}/summary")
-def get_summary(agent_id: str): # Changed function name for consistency
+def get_summary(agent_id: str): 
     if agent_id not in agents:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
     
@@ -230,9 +259,3 @@ def delete_agent(agent_id: str):
     
     del agents[agent_id]
     return {"deleted_agent_id": agent_id, "status": "success"}
-
-# Optional: Add exception handlers for more graceful error responses
-# from fastapi.responses import JSONResponse
-# @app.exception_handler(ValueError) # Example
-# async def value_error_exception_handler(request: Any, exc: ValueError):
-#    return JSONResponse(status_code=400, content={"message": str(exc)})
