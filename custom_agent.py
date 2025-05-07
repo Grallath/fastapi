@@ -42,6 +42,8 @@ class AutonomousGenerativeAgent(GenerativeAgent):
     status_update_chain: Optional[LLMChain] = None # Optional: for updating status after DO
     cached_summary: Optional[str] = None  # Cache for the summary to avoid duplicate generation
     cached_summary_time: Optional[datetime] = None  # When the summary was last generated
+    cached_relationship_context: Optional[str] = None  # Cache for relationship context
+    cached_relationship_time: Optional[datetime] = None  # When the relationship context was last generated
 
     def _initialize_chains(self):
         """Initialize the specific chains needed for autonomous reactions."""
@@ -78,13 +80,14 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                 "It is {current_time}.\n"
                 "Your status is: {agent_status}\n"
                 "You observe: {observation}\n"
-                "Relevant recent memories:\n{memory_context}\n\n"
+                "Relevant recent memories:\n{memory_context}\n"
+                "Relationship context: {relationship_context}\n\n"
                 "Considering your personality and the situation, what is your *internal thought* or *assessment* right now in response to the observation? "
                 "Describe the thought concisely. Do *not* describe actions or speech. Example: (Internal thought) That seems suspicious."
                 "\nInternal Thought:"
             )
             thought_prompt = PromptTemplate(
-                input_variables=["agent_name", "agent_traits", "current_time", "agent_status", "observation", "memory_context"],
+                input_variables=["agent_name", "agent_traits", "current_time", "agent_status", "observation", "memory_context", "relationship_context"],
                 template=thought_template
             )
             self.thought_chain = LLMChain(llm=self.llm, prompt=thought_prompt, verbose=self.verbose)
@@ -99,13 +102,14 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                 "It is {current_time}.\n"
                 "Your status is: {agent_status}\n"
                 "You observe: {observation}\n"
-                "Relevant recent memories:\n{memory_context}\n\n"
+                "Relevant recent memories:\n{memory_context}\n"
+                "Relationship context: {relationship_context}\n\n"
                 "Considering your personality and the situation, what *physical action* do you take in immediate response to the observation? "
                 "Describe the action concisely as if narrating it. Example: I shift my weight uneasily. / I draw my sword."
                 "\nAction Taken:"
             )
             action_prompt = PromptTemplate(
-                 input_variables=["agent_name", "agent_traits", "current_time", "agent_status", "observation", "memory_context"],
+                 input_variables=["agent_name", "agent_traits", "current_time", "agent_status", "observation", "memory_context", "relationship_context"],
                 template=action_template
             )
             self.action_chain = LLMChain(llm=self.llm, prompt=action_prompt, verbose=self.verbose)
@@ -129,6 +133,75 @@ class AutonomousGenerativeAgent(GenerativeAgent):
              self.status_update_chain = LLMChain(llm=self.llm, prompt=status_update_prompt, verbose=self.verbose)
              print(f"{BColors.DIM}DEBUG (Agent {self.name}): Status update chain initialized.{BColors.ENDC}")
 
+    def _get_entity_from_observation(self, observation: str) -> str:
+        """Extract the main entity from an observation."""
+        prompt = PromptTemplate.from_template(
+            "What is the observed entity in the following observation? {observation}"
+            + "\nEntity="
+        )
+        try:
+            entity = self.chain(prompt).run(observation=observation).strip()
+            print(f"{BColors.DIM}DEBUG (Agent {self.name}): Identified entity: '{entity}' from observation{BColors.ENDC}", flush=True)
+            return entity
+        except Exception as e:
+            print(f"{BColors.WARNING}WARN (Agent {self.name}): Failed to extract entity: {e}. Using fallback.{BColors.ENDC}", flush=True)
+            return "unknown entity"
+
+    def _get_entity_action(self, observation: str, entity_name: str) -> str:
+        """Determine what the entity is doing in the observation."""
+        prompt = PromptTemplate.from_template(
+            "What is the {entity} doing in the following observation? {observation}"
+            + "\nThe {entity} is"
+        )
+        try:
+            action = self.chain(prompt).run(entity=entity_name, observation=observation).strip()
+            print(f"{BColors.DIM}DEBUG (Agent {self.name}): Identified action: '{entity_name} is {action}'{BColors.ENDC}", flush=True)
+            return action
+        except Exception as e:
+            print(f"{BColors.WARNING}WARN (Agent {self.name}): Failed to extract action: {e}. Using fallback.{BColors.ENDC}", flush=True)
+            return "present"
+
+    def summarize_related_memories(self, observation: str, now: Optional[datetime] = None) -> str:
+        """Summarize memories that are most relevant to an observation, focusing on relationships."""
+        # Check if we have a recent cached relationship context
+        current_time = now or datetime.now()
+        if (self.cached_relationship_context is not None and 
+            self.cached_relationship_time is not None and
+            (current_time - self.cached_relationship_time).total_seconds() < 1.0):
+            print(f"{BColors.DIM}DEBUG (Agent {self.name}): Using cached relationship context{BColors.ENDC}", flush=True)
+            return self.cached_relationship_context
+            
+        prompt = PromptTemplate.from_template(
+            """
+{q1}?
+Context from memory:
+{relevant_memories}
+Relevant context: 
+"""
+        )
+        
+        try:
+            entity_name = self._get_entity_from_observation(observation)
+            entity_action = self._get_entity_action(observation, entity_name)
+            q1 = f"What is the relationship between {self.name} and {entity_name}"
+            q2 = f"{entity_name} is {entity_action}"
+            
+            # Get relationship context
+            relationship_context = self.chain(prompt=prompt).run(q1=q1, queries=[q1, q2]).strip()
+            
+            if not relationship_context or relationship_context.lower() == "none" or relationship_context.lower() == "no relevant context":
+                relationship_context = f"No known relationship with {entity_name}."
+                
+            print(f"{BColors.OKBLUE}DEBUG (Agent {self.name}): Generated relationship context: {relationship_context}{BColors.ENDC}", flush=True)
+            
+            # Cache the result
+            self.cached_relationship_context = relationship_context
+            self.cached_relationship_time = current_time
+            
+            return relationship_context
+        except Exception as e:
+            print(f"{BColors.WARNING}WARN (Agent {self.name}): Failed to summarize related memories: {e}. Using fallback.{BColors.ENDC}", flush=True)
+            return "No specific relationship information available."
 
     def _fetch_context(self, observation: str, now: Optional[datetime] = None) -> Tuple[str, str]:
         """Helper to get memory context and current time string."""
@@ -224,13 +297,18 @@ class AutonomousGenerativeAgent(GenerativeAgent):
         if not self.memory:
              raise ValueError("Agent memory is not initialized before generating reaction.")
 
-        # Reset the summary cache at the start of a new reaction generation
+        # Reset the caches at the start of a new reaction generation
         self.cached_summary = None
         self.cached_summary_time = None
+        self.cached_relationship_context = None
+        self.cached_relationship_time = None
 
         self._initialize_chains()
         call_time = now or datetime.now()
         reaction_type = self._decide_reaction_type(observation, call_time)
+
+        # Get relationship context for the observation
+        relationship_context = self.summarize_related_memories(observation, call_time)
 
         # Assess observation importance
         observation_poignancy = 0
@@ -290,6 +368,7 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                          agent_status=self.status,
                          observation=observation,
                          memory_context=memory_context,
+                         relationship_context=relationship_context,
                      ).strip()
                      print(f"{BColors.OKBLUE}DEBUG (Agent {self.name}): Generated thought: {thought_text}{BColors.ENDC}", flush=True)
                      memory_to_add = f"(Internal thought) {thought_text}"
@@ -310,6 +389,7 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                           agent_status=self.status,
                           observation=observation,
                           memory_context=memory_context,
+                          relationship_context=relationship_context,
                      ).strip()
                      print(f"{BColors.OKGREEN}DEBUG (Agent {self.name}): Generated action: {action_text}{BColors.ENDC}", flush=True)
                      memory_to_add = f"(Action) {action_text}"
