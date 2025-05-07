@@ -1,4 +1,4 @@
-# File: main.py (Reverted to Defaults)
+# File: main.py (Complete and Modified)
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Tuple
 
@@ -15,80 +15,50 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain.retrievers import TimeWeightedVectorStoreRetriever
-from langchain_experimental.generative_agents import (
-    GenerativeAgent, # Using BASE class
-    GenerativeAgentMemory, # Using BASE class
-)
+from langchain_experimental.generative_agents import GenerativeAgentMemory # Still needed for memory
 from langchain_core.documents import Document
 from langchain_community.vectorstores.utils import DistanceStrategy
-# Remove imports specifically needed only for overrides if they cause errors now
-# from langchain.prompts import PromptTemplate # May still be used by base classes
-# from langchain_core.language_models.base import BaseLanguageModel # May still be used by base classes
-# from langchain.chains.llm import LLMChain # May still be used by base classes
 
+# --- IMPORT THE CUSTOM AGENT ---
+from custom_agent import AutonomousGenerativeAgent, BColors # Import custom class and colors
 
-# ANSI Color Codes (Keep for logging)
-class BColors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-    DIM = '\033[2m'
+app = FastAPI(title="Autonomous Generative-Agent API") # Updated title
 
-    IMPORTANCE_HIGH = OKGREEN
-    IMPORTANCE_MEDIUM = WARNING
-    IMPORTANCE_LOW = FAIL
-
-    METADATA_KEY = OKCYAN
-    METADATA_VALUE = OKBLUE
-    CONTENT_COLOR = ENDC
-    SEPARATOR = DIM
-
-app = FastAPI(title="Generative-Agent API (Reverted to Defaults)")
-
-print(f"{BColors.OKGREEN}DEBUG: FastAPI application starting up... (Using Default Langchain Agents){BColors.ENDC}", flush=True)
+print(f"{BColors.OKGREEN}DEBUG: FastAPI application starting up... (Using Autonomous Agents){BColors.ENDC}", flush=True)
 
 DEFAULT_CHAT_MODEL = "gpt-4o-mini"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
+# Health Check endpoint remains the same
 @app.get("/")
 async def health_check():
     print(f"{BColors.OKGREEN}DEBUG: Health check '/' endpoint hit.{BColors.ENDC}", flush=True)
     return {"status": "ok"}
 
+
+# API Key check remains the same
 if not os.getenv("OPENAI_API_KEY"):
     print(f"{BColors.FAIL}CRITICAL_WARNING: OPENAI_API_KEY environment variable is NOT SET. OpenAI calls likely fail.{BColors.ENDC}", flush=True)
 else:
     print(f"{BColors.OKGREEN}DEBUG: OPENAI_API_KEY environment variable is detected.{BColors.ENDC}", flush=True)
 
 
-def _new_agent_instance(
+def _new_agent_instance( # Keep function signature the same
     name: str,
     age: int,
     traits: str,
     status: str,
     summary_refresh_seconds: int,
-    reflection_threshold: int, # Changed from Optional[float] to int to match your CreateAgentReq
+    reflection_threshold: int, # Keep as int
     verbose: bool,
     llm_model_name: Optional[str] = None,
     embedding_model_name: Optional[str] = None
-) -> GenerativeAgent:
-    print(f"{BColors.OKBLUE}DEBUG: _new_agent_instance called for agent '{BColors.BOLD}{name}{BColors.ENDC}{BColors.OKBLUE}' (Using Default Classes){BColors.ENDC}", flush=True)
-    print(f"{BColors.DIM}  LLM Model Request: '{llm_model_name}', Embedding Model Request: '{embedding_model_name}'{BColors.ENDC}", flush=True)
-    print(f"{BColors.DIM}  Input summary_refresh_seconds: {summary_refresh_seconds}, Input reflection_threshold: {reflection_threshold}{BColors.ENDC}", flush=True)
+) -> AutonomousGenerativeAgent: # Return type is now the custom class
+    print(f"{BColors.OKBLUE}DEBUG: _new_agent_instance called for agent '{BColors.BOLD}{name}{BColors.ENDC}{BColors.OKBLUE}' (Using Autonomous Class){BColors.ENDC}", flush=True)
 
+    # --- LLM Initialization ---
     effective_llm_model = llm_model_name if llm_model_name and llm_model_name.strip() else DEFAULT_CHAT_MODEL
-    effective_embedding_model = embedding_model_name if embedding_model_name and embedding_model_name.strip() else DEFAULT_EMBEDDING_MODEL
-
-    print(f"{BColors.DIM}  Effective LLM Model: '{effective_llm_model}'{BColors.ENDC}", flush=True)
-    print(f"{BColors.DIM}  Effective Embedding Model: '{effective_embedding_model}'{BColors.ENDC}", flush=True)
-
     agent_llm = None
     try:
         print(f"{BColors.DIM}DEBUG: Attempting to initialize ChatOpenAI for agent '{name}' with model: {effective_llm_model}{BColors.ENDC}", flush=True)
@@ -99,11 +69,14 @@ def _new_agent_instance(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to initialize LLM with model '{effective_llm_model}': {e}")
 
+    # --- Embedding Initialization ---
+    effective_embedding_model = embedding_model_name if embedding_model_name and embedding_model_name.strip() else DEFAULT_EMBEDDING_MODEL
     agent_embeddings = None
     dim = 0
     try:
         print(f"{BColors.DIM}DEBUG: Attempting to initialize OpenAIEmbeddings for agent '{name}' with model: {effective_embedding_model}{BColors.ENDC}", flush=True)
         agent_embeddings = OpenAIEmbeddings(model=effective_embedding_model)
+        # Probe to get embedding dimension
         probe_for_dim = agent_embeddings.embed_query("get_dim_probe_for_agent")
         dim = len(probe_for_dim)
         print(f"{BColors.OKGREEN}DEBUG: OpenAIEmbeddings for agent '{name}' (model {effective_embedding_model}, dim {dim}) initialized and tested.{BColors.ENDC}", flush=True)
@@ -112,19 +85,22 @@ def _new_agent_instance(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to initialize/test embeddings with model '{effective_embedding_model}': {e}")
 
+    # --- FAISS Setup ---
     print(f"{BColors.DIM}DEBUG: Setting up FAISS index for agent '{name}' (dim: {dim}). Using Inner Product.{BColors.ENDC}", flush=True)
     try:
+        # Using IndexFlatIP for Inner Product. L2 normalization is important.
         index = faiss.IndexFlatIP(dim)
         vectorstore = FAISS(
             embedding_function=agent_embeddings,
             index=index,
             docstore=InMemoryDocstore({}),
             index_to_docstore_id={},
-            normalize_L2=True,
-            distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT
+            normalize_L2=True, # Normalize vectors for IP distance
+            distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT # Use MAX_INNER_PRODUCT for IP
         )
+        # Consider adjusting decay_rate and k based on experimentation
         retriever = TimeWeightedVectorStoreRetriever(
-            vectorstore=vectorstore, k=15, decay_rate=0.01
+            vectorstore=vectorstore, k=15, decay_rate=0.01 # Default k=15
         )
         print(f"{BColors.OKGREEN}DEBUG: FAISS setup complete for agent '{name}'. (Index: IP, Normalize: True, Strategy: MAX_INNER_PRODUCT){BColors.ENDC}", flush=True)
     except Exception as e:
@@ -132,66 +108,76 @@ def _new_agent_instance(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed during FAISS setup: {e}")
 
-    print(f"{BColors.DIM}DEBUG: Setting up BASE GenerativeAgentMemory for agent '{name}'...{BColors.ENDC}", flush=True) # Using BASE
+    # --- Memory Setup ---
+    print(f"{BColors.DIM}DEBUG: Setting up GenerativeAgentMemory for agent '{name}'...{BColors.ENDC}", flush=True)
     try:
         # Reflection threshold needs to be Optional[float] for base GenerativeAgentMemory
         actual_reflect_for_memory = float(reflection_threshold) if reflection_threshold > 0 else None
-        print(f"{BColors.DIM}DEBUG: actual_reflect_for_memory (for BASE GenerativeAgentMemory) will be: {actual_reflect_for_memory}{BColors.ENDC}", flush=True)
-
-        memory_instance = GenerativeAgentMemory( # Using BASE class
+        print(f"{BColors.DIM}DEBUG: actual_reflect_for_memory (for GenerativeAgentMemory) will be: {actual_reflect_for_memory}{BColors.ENDC}", flush=True)
+        memory_instance = GenerativeAgentMemory(
             llm=agent_llm,
             memory_retriever=retriever,
-            reflection_threshold=actual_reflect_for_memory,
-            verbose=verbose, # Pass verbose to the memory class
-             # Other potential kwargs for base memory if needed
+            reflection_threshold=actual_reflect_for_memory, # Use the float/None value
+            verbose=verbose,
+            # Ensure necessary kwargs are passed if GenerativeAgentMemory's init changes
         )
-        print(f"{BColors.OKGREEN}DEBUG: BASE GenerativeAgentMemory setup complete for agent '{name}'.{BColors.ENDC}", flush=True) # Using BASE
+        print(f"{BColors.OKGREEN}DEBUG: GenerativeAgentMemory setup complete for agent '{name}'.{BColors.ENDC}", flush=True)
     except Exception as e:
-        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during BASE GenerativeAgentMemory setup for agent '{name}': {e}{BColors.ENDC}", flush=True) # Using BASE
+        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during GenerativeAgentMemory setup for agent '{name}': {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed during BASE GenerativeAgentMemory setup: {e}") # Using BASE
+        raise HTTPException(status_code=500, detail=f"Failed during GenerativeAgentMemory setup: {e}")
 
-    print(f"{BColors.DIM}DEBUG: Initializing BASE GenerativeAgent '{name}'...{BColors.ENDC}", flush=True) # Using BASE
+    # --- INSTANTIATE THE CUSTOM AGENT CLASS ---
+    print(f"{BColors.DIM}DEBUG: Initializing AutonomousGenerativeAgent '{name}'...{BColors.ENDC}", flush=True)
     try:
-        actual_refresh_for_agent = summary_refresh_seconds
-        print(f"{BColors.DIM}DEBUG: actual_refresh_for_agent (for BASE GenerativeAgent) will be: {actual_refresh_for_agent}{BColors.ENDC}", flush=True)
-
-        agent = GenerativeAgent( # Using BASE class
+        # summary_refresh_seconds expects int in base GenerativeAgent
+        agent = AutonomousGenerativeAgent( # Use the custom class
             name=name,
             age=age,
             traits=traits,
             status=status,
-            memory=memory_instance, # Pass the BASE GenerativeAgentMemory instance
+            memory=memory_instance, # Pass the GenerativeAgentMemory instance
             llm=agent_llm,
-            summary_refresh_seconds=actual_refresh_for_agent,
+            summary_refresh_seconds=summary_refresh_seconds, # Pass int directly
             verbose=verbose,
+            # Add other necessary kwargs if the __init__ signature requires them
         )
-        print(f"{BColors.OKGREEN}DEBUG: BASE GenerativeAgent '{name}' initialized successfully.{BColors.ENDC}", flush=True) # Using BASE
+        # Immediately initialize the custom chains after the agent object is created
+        agent._initialize_chains()
+        print(f"{BColors.OKGREEN}DEBUG: AutonomousGenerativeAgent '{name}' initialized successfully.{BColors.ENDC}", flush=True)
         return agent
     except Exception as e:
-        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during BASE GenerativeAgent initialization for agent '{name}': {e}{BColors.ENDC}", flush=True) # Using BASE
+        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during AutonomousGenerativeAgent initialization for agent '{name}': {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed during BASE GenerativeAgent initialization: {e}") # Using BASE
+        raise HTTPException(status_code=500, detail=f"Failed during AutonomousGenerativeAgent initialization: {e}")
 
 
-agents: Dict[str, GenerativeAgent] = {}
+# --- Ensure agents dictionary holds the correct type ---
+agents: Dict[str, AutonomousGenerativeAgent] = {} # Use the custom class type
 
-# Pydantic Models (No changes needed)
+# --- Pydantic Models ---
 class CreateAgentReq(BaseModel):
     name: str
     age: int
     traits: str
     status: str
     agent_id: Optional[str] = None
-    summary_refresh_seconds: int = Field(default=0, ge=0)
-    reflection_threshold: int = Field(default=0, ge=0) # Keep as int here for API input
+    summary_refresh_seconds: int = Field(default=3600, ge=0) # Default to 1 hour
+    reflection_threshold: int = Field(default=8, ge=0) # Default reflection threshold (adjust as needed)
     verbose: bool = False
     model_name: Optional[str] = None
     embedding_model_name: Optional[str] = None
 
 class GenerateResponseReq(BaseModel):
-    prompt: str
-    k: Optional[int] = Field(default=None, gt=0)
+    prompt: str # Use 'prompt' as the observation/input text
+    k: Optional[int] = Field(default=None, gt=0) # Optional override for retriever K
+
+# Structure for the new response
+class GenerateReactionResponse(BaseModel):
+    agent_name: str
+    reaction_type: str # SAY, THINK, DO, IGNORE, UNKNOWN
+    content: str       # The actual dialogue, thought, or action description
+    observation_was_important: bool # Based on initial poignancy score
 
 class AddMemoryReq(BaseModel):
     text_to_memorize: str
@@ -204,7 +190,9 @@ class UpdateStatusReq(BaseModel):
     new_status: str
 
 
-# Endpoints (No changes needed in endpoint logic)
+# --- Endpoints ---
+
+# /agents POST (create_agent) uses the modified _new_agent_instance
 @app.post("/agents", status_code=201)
 def create_agent(req: CreateAgentReq):
     print(f"{BColors.HEADER}DEBUG: /agents POST request received: {req.model_dump_json(exclude_none=True)}{BColors.ENDC}", flush=True)
@@ -216,30 +204,36 @@ def create_agent(req: CreateAgentReq):
     current_agent_instance = None
     try:
         print(f"{BColors.DIM}DEBUG: Calling _new_agent_instance for agent_id '{aid}' with name '{req.name}'{BColors.ENDC}", flush=True)
+        # This now calls the function that returns AutonomousGenerativeAgent
         current_agent_instance = _new_agent_instance(
             name=req.name,
             age=req.age,
             traits=req.traits,
             status=req.status,
             summary_refresh_seconds=req.summary_refresh_seconds,
-            reflection_threshold=req.reflection_threshold, # Pass int
+            reflection_threshold=req.reflection_threshold,
             verbose=req.verbose,
             llm_model_name=req.model_name,
             embedding_model_name=req.embedding_model_name
         )
         agents[aid] = current_agent_instance
         print(f"{BColors.OKGREEN}DEBUG: Agent '{BColors.BOLD}{aid}{BColors.ENDC}{BColors.OKGREEN}' (name: '{req.name}') created and stored.{BColors.ENDC}", flush=True)
-    except HTTPException as e:
-        print(f"{BColors.WARNING}DEBUG: HTTPException caught in create_agent for agent_id '{aid}': {e.detail}{BColors.ENDC}", flush=True)
-        raise e
+    except HTTPException as http_exc:
+        # Re-raise known HTTP exceptions from _new_agent_instance
+        print(f"{BColors.WARNING}DEBUG: HTTPException caught in create_agent for agent_id '{aid}': {http_exc.detail}{BColors.ENDC}", flush=True)
+        raise http_exc
     except Exception as e:
+        # Catch unexpected errors during creation
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Unexpected error in create_agent endpoint for agent_id '{aid}': {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
+        # Clean up if agent was partially added
+        if aid in agents:
+            del agents[aid]
         raise HTTPException(status_code=500, detail=f"Unexpected server error during agent creation: {e}")
 
+    # --- Get model names used ---
     llm_model_used = "unknown"
     embedding_model_used = "unknown"
-
     if current_agent_instance:
         if hasattr(current_agent_instance, 'llm') and current_agent_instance.llm and hasattr(current_agent_instance.llm, 'model_name'):
             llm_model_used = current_agent_instance.llm.model_name
@@ -252,15 +246,19 @@ def create_agent(req: CreateAgentReq):
             hasattr(current_agent_instance.memory.memory_retriever.vectorstore.embedding_function, 'model')):
             embedding_model_used = current_agent_instance.memory.memory_retriever.vectorstore.embedding_function.model
     else:
+        # This case should ideally not happen if exceptions are handled correctly
         print(f"{BColors.FAIL}ERROR: current_agent_instance is None after creation attempt for agent_id '{aid}'. This indicates a logic flaw.{BColors.ENDC}", flush=True)
+        # Attempt to retrieve if somehow added to dict but not returned
         if aid in agents and agents[aid] is not None:
-            retrieved_agent = agents[aid]
-            if hasattr(retrieved_agent, 'llm') and retrieved_agent.llm and hasattr(retrieved_agent.llm, 'model_name'):
+             retrieved_agent = agents[aid]
+             # Attempt to get models from stored agent
+             if hasattr(retrieved_agent, 'llm') and retrieved_agent.llm and hasattr(retrieved_agent.llm, 'model_name'):
                  llm_model_used = retrieved_agent.llm.model_name
-            if (hasattr(retrieved_agent, 'memory') and hasattr(retrieved_agent.memory, 'memory_retriever') and
-                hasattr(retrieved_agent.memory.memory_retriever, 'vectorstore') and hasattr(retrieved_agent.memory.memory_retriever.vectorstore, 'embedding_function')
-                and hasattr(retrieved_agent.memory.memory_retriever.vectorstore.embedding_function, 'model')):
+             if (hasattr(retrieved_agent, 'memory') and hasattr(retrieved_agent.memory, 'memory_retriever') and
+                 hasattr(retrieved_agent.memory.memory_retriever, 'vectorstore') and hasattr(retrieved_agent.memory.memory_retriever.vectorstore, 'embedding_function')
+                 and hasattr(retrieved_agent.memory.memory_retriever.vectorstore.embedding_function, 'model')):
                  embedding_model_used = retrieved_agent.memory.memory_retriever.vectorstore.embedding_function.model
+
 
     print(f"{BColors.OKGREEN}DEBUG: Agent '{BColors.BOLD}{aid}{BColors.ENDC}{BColors.OKGREEN}' creation processing complete. LLM: {llm_model_used}, Embedding: {embedding_model_used}. Responding.{BColors.ENDC}", flush=True)
     return {
@@ -270,6 +268,8 @@ def create_agent(req: CreateAgentReq):
         "embedding_model_used": embedding_model_used
     }
 
+
+# /agents GET (list_agents) remains the same
 @app.get("/agents")
 def list_agents():
     print(f"{BColors.HEADER}DEBUG: /agents GET request received (list_agents){BColors.ENDC}", flush=True)
@@ -306,6 +306,8 @@ def list_agents():
     print(f"{BColors.DIM}DEBUG: Returning {len(agent_details)} agents.{BColors.ENDC}", flush=True)
     return {"agents": agent_details}
 
+
+# /update_status POST remains the same
 @app.post("/agents/{agent_id}/update_status")
 def update_agent_status(agent_id: str, req: UpdateStatusReq):
     print(f"{BColors.HEADER}>>> Incoming Update Status Request for Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} <<<", flush=True)
@@ -318,8 +320,14 @@ def update_agent_status(agent_id: str, req: UpdateStatusReq):
     agent = agents[agent_id]
 
     try:
-        agent.status = req.new_status.strip()
+        # Basic validation/stripping
+        new_status_stripped = req.new_status.strip()
+        if not new_status_stripped:
+            raise HTTPException(status_code=400, detail="New status cannot be empty.")
+        agent.status = new_status_stripped
         print(f"{BColors.OKGREEN}SUCCESS: Agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}' status updated to: '{agent.status}'{BColors.ENDC}", flush=True)
+    except HTTPException as e:
+        raise e # Re-raise validation errors
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error updating status for agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.FAIL}': {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
@@ -329,46 +337,85 @@ def update_agent_status(agent_id: str, req: UpdateStatusReq):
     return {"agent_id": agent_id, "status": agent.status}
 
 
-@app.post("/agents/{agent_id}/generate_response")
+# --- MODIFIED /generate_response Endpoint ---
+@app.post("/agents/{agent_id}/generate_response", response_model=GenerateReactionResponse)
 def generate_response(agent_id: str, req: GenerateResponseReq):
-    print(f"{BColors.HEADER}DEBUG: /generate_response for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} with prompt: '{req.prompt[:50]}...' (K={req.k or 'default'}){BColors.ENDC}", flush=True)
+    # Use 'prompt' from the request model as the observation
+    observation = req.prompt.strip()
+    print(f"{BColors.HEADER}DEBUG: /generate_response for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} with observation: '{observation[:50]}...' (K={req.k or 'default'}){BColors.ENDC}", flush=True)
     if agent_id not in agents or agents[agent_id] is None:
         print(f"{BColors.FAIL}ERROR: Agent '{agent_id}' not found or is None for generate_response.{BColors.ENDC}", flush=True)
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found or invalid.")
+
+    if not observation:
+         print(f"{BColors.WARNING}WARN: Observation cannot be empty.{BColors.ENDC}", flush=True)
+         raise HTTPException(status_code=400, detail="Observation cannot be empty.")
 
     agent = agents[agent_id]
     original_k = -1
     retriever = agent.memory.memory_retriever
     if hasattr(retriever, 'k'):
-         original_k = retriever.k
+         original_k = retriever.k # Backup original K
     else:
+        # This shouldn't happen with TimeWeightedVectorStoreRetriever but check anyway
         print(f"{BColors.WARNING}WARN: Agent {agent_id} retriever missing k attribute for k value backup in generate_response.{BColors.ENDC}", flush=True)
 
+    reaction_string = ""
+    observation_was_important = False
     try:
+        # Temporarily set K if requested
         if req.k is not None and req.k > 0:
             if hasattr(retriever, 'k'):
                 retriever.k = req.k
+                print(f"{BColors.DIM}DEBUG: Temporarily set retriever k to {req.k} for agent {agent_id}.{BColors.ENDC}", flush=True)
             else:
                 print(f"{BColors.WARNING}WARN: Cannot set k for agent {agent_id}; retriever missing k attribute.{BColors.ENDC}", flush=True)
 
-        print(f"{BColors.DIM}Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.DIM} current status before generation: '{agent.status}'{BColors.ENDC}", flush=True)
-        # This will now use the BASE GenerativeAgent dialogue generation logic
-        prompt_is_important, response_text = agent.generate_dialogue_response(req.prompt.strip(), datetime.now())
+        print(f"{BColors.DIM}Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.DIM} current status before reaction: '{agent.status}'{BColors.ENDC}", flush=True)
+
+        # --- CALL THE NEW generate_reaction METHOD ---
+        observation_was_important, reaction_string = agent.generate_reaction(observation, datetime.now())
+        print(f"{BColors.OKGREEN}DEBUG: agent.generate_reaction completed for {agent_id}. Raw output: '{reaction_string}' | Observation important flag: {observation_was_important}{BColors.ENDC}", flush=True)
 
     except Exception as e:
-        print(f"{BColors.FAIL}ERROR_STACKTRACE: Error during dialogue generation for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
+        print(f"{BColors.FAIL}ERROR_STACKTRACE: Error during reaction generation for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error during dialogue generation: {e}")
+        raise HTTPException(status_code=500, detail=f"Error during reaction generation: {e}")
     finally:
+        # Restore original K value
         if original_k != -1 and hasattr(retriever, 'k'):
-            retriever.k = original_k
+             retriever.k = original_k
+             print(f"{BColors.DIM}DEBUG: Restored retriever k to {original_k} for agent {agent_id}.{BColors.ENDC}", flush=True)
 
-    return {
-        "agent_name": agent.name,
-        "response": response_text,
-        "prompt_is_important_to_memorize": prompt_is_important
-    }
+    # --- PARSE THE REACTION STRING ---
+    reaction_type = "UNKNOWN"
+    content = ""
 
+    if reaction_string.startswith("SAY:"):
+        reaction_type = "SAY"
+        content = reaction_string[len("SAY:"):].strip()
+    elif reaction_string.startswith("THINK:"):
+        reaction_type = "THINK"
+        content = reaction_string[len("THINK:"):].strip()
+    elif reaction_string.startswith("DO:"):
+        reaction_type = "DO"
+        content = reaction_string[len("DO:"):].strip()
+    elif not reaction_string: # Empty string means ignore
+        reaction_type = "IGNORE"
+        content = ""
+    else:
+        # Should not happen if generate_reaction works correctly
+        print(f"{BColors.WARNING}WARN: Unexpected reaction string format from agent {agent_id}: '{reaction_string}'. Setting type to UNKNOWN.{BColors.ENDC}", flush=True)
+        content = reaction_string # Pass through raw string if unknown
+
+    return GenerateReactionResponse(
+        agent_name=agent.name,
+        reaction_type=reaction_type,
+        content=content,
+        observation_was_important=observation_was_important
+    )
+
+# /add_memory POST remains the same
 @app.post("/agents/{agent_id}/add_memory")
 def add_memory(agent_id: str, req: AddMemoryReq):
     print(f"{BColors.HEADER}DEBUG: /add_memory for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} with text: '{req.text_to_memorize[:50]}...'{BColors.ENDC}", flush=True)
@@ -381,16 +428,19 @@ def add_memory(agent_id: str, req: AddMemoryReq):
         print(f"{BColors.WARNING}WARN: Memory text may not be empty.{BColors.ENDC}", flush=True)
         raise HTTPException(status_code=400, detail="Memory text may not be empty.")
 
+    agent = agents[agent_id]
     try:
-        agents[agent_id].memory.add_memory(text_to_add, now=datetime.now())
+        # Use the memory object associated with the agent
+        agent.memory.add_memory(text_to_add, now=datetime.now())
         print(f"{BColors.OKGREEN}DEBUG: Memory added successfully for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}.{BColors.ENDC}", flush=True)
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error adding memory for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error adding memory: {e}")
 
-    return {"added_memory": text_to_add}
+    return {"status": "success", "added_memory": text_to_add}
 
+# /fetch_memories POST remains the same, but uses the updated memory structure if applicable
 @app.post("/agents/{agent_id}/fetch_memories")
 def fetch_memories(agent_id: str, req: FetchMemoriesReq):
     print(f"{BColors.HEADER}>>> Incoming Fetch Memories Request for Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} <<<", flush=True)
@@ -407,39 +457,53 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
 
     agent = agents[agent_id]
     original_k = -1
-
     retriever = agent.memory.memory_retriever
     if hasattr(retriever, 'k'):
-        original_k = retriever.k
+        original_k = retriever.k # Backup K
 
     retrieved_docs_for_response_payload: List[Dict[str, Any]] = []
 
     try:
+        # Temporarily set K if requested
+        requested_k = retriever.k # Start with default
         if req.k is not None and req.k > 0:
             if hasattr(retriever, 'k'):
-                retriever.k = req.k
+                requested_k = req.k
+                retriever.k = requested_k # Set temporary K
+                print(f"{BColors.DIM}DEBUG: Temporarily set retriever k to {req.k} for fetch_memories.{BColors.ENDC}", flush=True)
             else:
                 print(f"{BColors.WARNING}WARN: Cannot set k for agent {agent_id}; retriever does not have 'k' attribute.{BColors.ENDC}", flush=True)
 
-        docs_and_scores: List[Tuple[Document, float]]
+        # Fetch memories using the agent's built-in method which uses the retriever
+        # Now returns Document objects directly
+        retrieved_docs_only: List[Document] = agent.fetch_memories(observation, now=datetime.now())
+
+        # Manually get scores if needed (requires vectorstore access)
+        docs_and_scores: List[Tuple[Document, float]] = []
         if hasattr(agent.memory.memory_retriever, "vectorstore") and \
            hasattr(agent.memory.memory_retriever.vectorstore, "similarity_search_with_relevance_scores"):
-            print(f"{BColors.DIM}DEBUG: Fetching memories using similarity_search_with_relevance_scores for agent {agent_id}.{BColors.ENDC}", flush=True)
+            print(f"{BColors.DIM}DEBUG: Fetching scores using similarity_search_with_relevance_scores for agent {agent_id}.{BColors.ENDC}", flush=True)
+            # Fetch again with scores using the vectorstore directly
             docs_and_scores = agent.memory.memory_retriever.vectorstore.similarity_search_with_relevance_scores(
                 observation,
-                k=retriever.k if hasattr(retriever, 'k') else 15,
+                k=requested_k, # Use the potentially overridden k
             )
+            # We might get more docs here than fetch_memories returned if fetch_memories does extra filtering.
+            # Match based on content if necessary, or just use the scored list.
+            # For simplicity, we'll use the scored list directly.
         else:
-            print(f"{BColors.WARNING}WARN: Using agent.memory.fetch_memories() for agent {agent_id}, scores might not be raw relevance scores.{BColors.ENDC}", flush=True)
-            retrieved_docs_only: List[Document] = agent.memory.fetch_memories(observation, now=datetime.now())
-            docs_and_scores = [(doc, doc.metadata.get('relevance_score', 0.0)) for doc in retrieved_docs_only]
+            print(f"{BColors.WARNING}WARN: Cannot get relevance scores reliably for agent {agent_id}. Scores will be 0.0.{BColors.ENDC}", flush=True)
+            docs_and_scores = [(doc, 0.0) for doc in retrieved_docs_only] # Assign 0 score if cannot fetch properly
 
+        # Prepare response payload
         for doc, score in docs_and_scores:
             retrieved_docs_for_response_payload.append({
                 "content": doc.page_content,
+                "metadata": doc.metadata, # Include all metadata
                 "relevance_score": score
             })
 
+        # --- Detailed Logging (same as before) ---
         print(f"\n{BColors.OKBLUE}--- Detailed Fetched Memories (Agent: {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKBLUE}) ---{BColors.ENDC}", flush=True)
         if not docs_and_scores:
             print(f"{BColors.WARNING}No memories were fetched for this observation.{BColors.ENDC}", flush=True)
@@ -471,51 +535,88 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
                 print(f"    {BColors.METADATA_KEY}Created At:{BColors.ENDC} {BColors.METADATA_VALUE}{created_at_str}{BColors.ENDC}", flush=True)
                 print(f"    {BColors.METADATA_KEY}Last Accessed:{BColors.ENDC} {BColors.METADATA_VALUE}{last_accessed_at_str}{BColors.ENDC}", flush=True)
                 print(f"    {BColors.METADATA_KEY}Buffer Idx:{BColors.ENDC} {BColors.METADATA_VALUE}{buffer_idx}{BColors.ENDC}", flush=True)
+                # Print other metadata if present
+                other_meta = {k: v for k, v in doc.metadata.items() if k not in ['importance', 'created_at', 'last_accessed_at', 'buffer_idx']}
+                if other_meta:
+                    print(f"    {BColors.METADATA_KEY}Other Meta:{BColors.ENDC} {BColors.METADATA_VALUE}{other_meta}{BColors.ENDC}", flush=True)
+
         if docs_and_scores:
             print(f"{BColors.SEPARATOR}{'-'*70}{BColors.ENDC}", flush=True)
         print(f"{BColors.OKBLUE}--- End of Detailed Fetched Memories ---{BColors.ENDC}\n", flush=True)
 
+
     except HTTPException as e:
-        raise e
+        raise e # Re-raise validation errors
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error fetching memories for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error fetching memories: {e}")
     finally:
+        # Restore original K value
         if original_k != -1 and hasattr(retriever, 'k'):
              retriever.k = original_k
+             print(f"{BColors.DIM}DEBUG: Restored retriever k to {original_k} for fetch_memories.{BColors.ENDC}", flush=True)
 
     print(f"{BColors.HEADER}<<< Completing Fetch Memories Request for Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} >>>{BColors.ENDC}\n", flush=True)
     return {"memories": retrieved_docs_for_response_payload }
 
 
+# /summary GET remains the same
 @app.get("/agents/{agent_id}/summary")
 def get_summary(agent_id: str):
-    print(f"{BColors.HEADER}DEBUG: /summary for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER}", flush=True)
+    print(f"{BColors.HEADER}DEBUG: /summary GET request for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER}", flush=True)
     if agent_id not in agents or agents[agent_id] is None:
         print(f"{BColors.FAIL}ERROR: Agent '{agent_id}' not found or is None for get_summary.{BColors.ENDC}", flush=True)
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found or invalid.")
 
+    agent = agents[agent_id]
     summary_text = "Error generating summary."
     try:
-        summary_text = agents[agent_id].get_summary(force_refresh=True)
+        # Force refresh to get the latest summary based on current memories
+        summary_text = agent.get_summary(force_refresh=True)
         print(f"{BColors.OKGREEN}DEBUG: Summary generated successfully for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}.{BColors.ENDC}", flush=True)
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error generating summary for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error generating summary: {e}")
+        # Don't raise HTTPException here, return the error message in the response
+        summary_text = f"Error generating summary: {e}"
 
     return {"agent_id": agent_id, "summary": summary_text}
 
+
+# /delete_agent DELETE remains the same
 @app.delete("/agents/{agent_id}")
 def delete_agent(agent_id: str):
-    print(f"{BColors.HEADER}DEBUG: /delete_agent for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER}", flush=True)
+    print(f"{BColors.HEADER}DEBUG: /delete_agent DELETE request for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER}", flush=True)
     if agent_id not in agents:
         print(f"{BColors.FAIL}ERROR: Agent '{agent_id}' not found for delete_agent.{BColors.ENDC}", flush=True)
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
 
-    del agents[agent_id]
-    print(f"{BColors.OKGREEN}DEBUG: Agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}' deleted successfully.{BColors.ENDC}", flush=True)
+    # Explicitly delete agent object to potentially help GC, then remove from dict
+    try:
+        agent_instance = agents.pop(agent_id)
+        del agent_instance # Hint to GC
+        print(f"{BColors.OKGREEN}DEBUG: Agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}' deleted successfully.{BColors.ENDC}", flush=True)
+    except KeyError:
+        # Should not happen if initial check passes, but handle defensively
+        print(f"{BColors.FAIL}ERROR: Agent '{agent_id}' was not in the dictionary during deletion attempt.{BColors.ENDC}", flush=True)
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found during deletion.") # Should be 404 still
+    except Exception as e:
+        # Catch unexpected errors during deletion
+        print(f"{BColors.FAIL}ERROR_STACKTRACE: Unexpected error deleting agent {agent_id}: {e}{BColors.ENDC}", flush=True)
+        traceback.print_exc()
+        # Put the agent back if deletion failed unexpectedly? Or just report error?
+        # Let's report error and leave it potentially removed from dict.
+        raise HTTPException(status_code=500, detail=f"Unexpected error deleting agent: {e}")
+
     return {"deleted_agent_id": agent_id, "status": "success"}
 
-print(f"{BColors.OKGREEN}DEBUG: FastAPI application finished loading. (Using Default Langchain Agents){BColors.ENDC}", flush=True)
+
+print(f"{BColors.OKGREEN}DEBUG: FastAPI application finished loading. (Using Autonomous Agents){BColors.ENDC}", flush=True)
+
+# To run this:
+# 1. Save the first code block as `custom_agent.py`
+# 2. Save the second code block as `main.py`
+# 3. Ensure you have the necessary libraries installed (`fastapi`, `uvicorn`, `langchain-openai`, `langchain_experimental`, `faiss-cpu` or `faiss-gpu`, `numpy`, `langchain`)
+# 4. Set your `OPENAI_API_KEY` environment variable.
+# 5. Run with `uvicorn main:app --reload`
