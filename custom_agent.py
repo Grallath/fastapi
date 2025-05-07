@@ -130,15 +130,20 @@ class AutonomousGenerativeAgent(GenerativeAgent):
 
     def _fetch_context(self, observation: str, now: Optional[datetime] = None) -> Tuple[str, str]:
         """Helper to get memory context and current time string."""
-        # Ensure retriever k value is handled if temporarily changed
+        if not self.memory:
+             raise ValueError("Agent memory is not initialized.")
+
         original_k = -1
         retriever = self.memory.memory_retriever
         if hasattr(retriever, 'k'):
-            original_k = retriever.k # Store original K if needed
-        # Add logic here if you want to temporarily change K for context fetching
+            original_k = retriever.k
 
         try:
-            relevant_memories = self.fetch_memories(observation, now)
+            # --- CORRECTED LINE ---
+            # Call fetch_memories on the memory object, not self
+            relevant_memories: List[Document] = self.memory.fetch_memories(observation, now)
+            # --- END CORRECTION ---
+
             memory_context = "\n".join(
                 [f"- {m.page_content.strip()}" for m in relevant_memories]
             )
@@ -168,9 +173,10 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                 agent_status=self.status,
                 observation=observation,
                 memory_context=memory_context,
-                # stop=["\n"] # Keep stop token
+                # stop=["\n"] # Keep stop token if needed, might vary by LLM
             )
-            decision = result.strip().upper().split('\n')[0].replace('"', '').replace("'", '') # Get first line, clean up
+            # More robust parsing: get first line, strip whitespace and quotes
+            decision = result.strip().split('\n')[0].replace('"', '').replace("'", '').strip().upper()
         except Exception as e:
             print(f"{BColors.FAIL}ERROR (Agent {self.name}): Exception during decision chain: {e}{BColors.ENDC}", flush=True)
             decision = "THINK" # Default if chain fails
@@ -183,10 +189,10 @@ class AutonomousGenerativeAgent(GenerativeAgent):
             # Try to find a valid type within the response if simple strip failed
             found = False
             for vt in valid_types:
-                if vt in decision:
+                if vt in result.strip().upper(): # Check in original result
                     decision = vt
                     found = True
-                    print(f"{BColors.DIM}DEBUG (Agent {self.name}): Corrected decision to '{decision}'{BColors.ENDC}")
+                    print(f"{BColors.DIM}DEBUG (Agent {self.name}): Corrected decision to '{decision}' from raw result '{result.strip()}'{BColors.ENDC}")
                     break
             if not found:
                 print(f"{BColors.WARNING}WARN (Agent {self.name}): LLM decision '{result}' invalid, defaulting to THINK.{BColors.ENDC}", flush=True)
@@ -199,6 +205,9 @@ class AutonomousGenerativeAgent(GenerativeAgent):
         Generates a reaction (SAY, THINK, DO, or IGNORE) based on the observation.
         Returns: (observation_was_important, reaction_output_string)
         """
+        if not self.memory:
+             raise ValueError("Agent memory is not initialized before generating reaction.")
+
         self._initialize_chains() # Ensure chains are ready
         call_time = now or datetime.now()
         reaction_type = self._decide_reaction_type(observation, call_time)
@@ -206,41 +215,52 @@ class AutonomousGenerativeAgent(GenerativeAgent):
         # Assess observation importance
         observation_poignancy = 0
         add_observation_memory = False
-        if self.memory.reflection_threshold is not None: # Only score if reflection is enabled
+        # Check if reflection is enabled (threshold is not None and > 0)
+        reflection_enabled = self.memory.reflection_threshold is not None and self.memory.reflection_threshold > 0
+
+        if reflection_enabled:
             try:
                  if hasattr(self.memory, 'score_memory_importance'):
                      observation_poignancy = self.memory.score_memory_importance(observation)
                  else: # Fallback if method isn't available
-                    # This fallback is less accurate
+                    print(f"{BColors.WARNING}WARN (Agent {self.name}): memory.score_memory_importance not found. Using fallback scoring.{BColors.ENDC}")
                     poignancy_chain = LLMChain(llm=self.llm, prompt=PromptTemplate.from_template(
                         "Rate the poignancy of this observation on a scale of 1 to 10 (integer): {observation}\nRating:"))
                     try:
-                       observation_poignancy = int(poignancy_chain.run(observation=observation).strip())
+                       poignancy_result = poignancy_chain.run(observation=observation).strip()
+                       observation_poignancy = int(poignancy_result)
                     except ValueError:
+                       print(f"{BColors.WARNING}WARN (Agent {self.name}): Fallback poignancy scoring failed to parse integer from '{poignancy_result}'. Defaulting to 3.{BColors.ENDC}")
                        observation_poignancy = 3
+                 # Check against the threshold stored in memory
                  add_observation_memory = observation_poignancy >= self.memory.reflection_threshold
-                 print(f"{BColors.DIM}DEBUG (Agent {self.name}): Observation poignancy rated: {observation_poignancy} (Threshold: {self.memory.reflection_threshold}){BColors.ENDC}", flush=True)
+                 print(f"{BColors.DIM}DEBUG (Agent {self.name}): Observation poignancy rated: {observation_poignancy} (Threshold: {self.memory.reflection_threshold}, AddMem: {add_observation_memory}){BColors.ENDC}", flush=True)
             except Exception as e:
-                 print(f"{BColors.WARNING}WARN (Agent {self.name}): Failed to score observation poignancy: {e}. Defaulting importance.{BColors.ENDC}", flush=True)
-                 observation_poignancy = 3 # Default importance score
+                 print(f"{BColors.WARNING}WARN (Agent {self.name}): Failed to score observation poignancy: {e}. Defaulting importance based on reaction.{BColors.ENDC}", flush=True)
+                 observation_poignancy = 3 # Default importance score if scoring fails
                  add_observation_memory = reaction_type != "IGNORE" # Add if reacting, even if scoring failed
+        else:
+            # If reflection is disabled, don't score importance, only add memory if reacting
+            add_observation_memory = reaction_type != "IGNORE"
+            print(f"{BColors.DIM}DEBUG (Agent {self.name}): Reflection disabled. AddMem based on reaction: {add_observation_memory}{BColors.ENDC}")
 
-        # Now generate reaction based on decision
+
+        # Generate reaction based on decision
         reaction_output = ""
 
         if reaction_type == "IGNORE":
             print(f"{BColors.DIM}DEBUG (Agent {self.name}): Chose to IGNORE.{BColors.ENDC}", flush=True)
             reaction_output = ""
-            if add_observation_memory:
+            # Add observation memory ONLY if it independently crossed the threshold
+            if add_observation_memory and reflection_enabled:
                  print(f"{BColors.DIM}DEBUG (Agent {self.name}): Adding poignant observation to memory despite IGNORE.{BColors.ENDC}", flush=True)
                  self.memory.add_memory(observation, now=call_time, importance=observation_poignancy)
-            # Observation itself wasn't reacted to, so return False for importance in this context?
-            # Let's return True only if the observation *independently* crossed the threshold
+            # Return importance based ONLY on the threshold check when ignoring
             return (add_observation_memory, reaction_output)
 
-        else: # THINK, DO, or SAY
+        else: # THINK, DO, or SAY involve a reaction
              memory_context, current_time_str = self._fetch_context(observation, call_time)
-             agent_summary = self.get_summary(now=call_time, force_refresh=False)
+             agent_summary = self.get_summary(now=call_time, force_refresh=False) # Use existing summary if fresh
 
              if reaction_type == "THINK":
                  try:
@@ -253,14 +273,14 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                          memory_context=memory_context,
                      ).strip()
                      print(f"{BColors.OKBLUE}DEBUG (Agent {self.name}): Generated thought: {thought_text}{BColors.ENDC}", flush=True)
+                     # Add thought to memory - let memory class score its importance
                      memory_to_add = f"(Internal thought) {thought_text}"
-                     self.memory.add_memory(memory_to_add, now=call_time) # Let memory score it
+                     self.memory.add_memory(memory_to_add, now=call_time)
                      reaction_output = f"THINK: {thought_text}"
                  except Exception as e:
                      print(f"{BColors.FAIL}ERROR (Agent {self.name}): Exception during thought chain: {e}{BColors.ENDC}", flush=True)
                      reaction_output = "THINK: (Error generating thought)"
                      self.memory.add_memory("(Internal thought) Error generating thought.", now=call_time)
-
 
              elif reaction_type == "DO":
                  try:
@@ -275,7 +295,7 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                      print(f"{BColors.OKGREEN}DEBUG (Agent {self.name}): Generated action: {action_text}{BColors.ENDC}", flush=True)
                      memory_to_add = f"(Action) {action_text}"
                      self.memory.add_memory(memory_to_add, now=call_time)
-                     # Update status
+                     # Update status based on action
                      try:
                         updated_status = self.status_update_chain.run(
                             agent_name=self.name,
@@ -283,10 +303,15 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                             previous_status=self.status,
                             action_taken=action_text,
                             # stop=["\n"]
-                        ).strip().split('\n')[0].replace('"', '').replace("'", '') # Clean up status
+                        ).strip().split('\n')[0].replace('"', '').replace("'", '').strip() # Clean up status aggressively
                         if updated_status:
-                            self.status = updated_status
-                            print(f"{BColors.DIM}DEBUG (Agent {self.name}): Status updated to: '{self.status}'{BColors.ENDC}", flush=True)
+                            # Basic check to prevent nonsensical updates
+                            if len(updated_status) > 5 and not updated_status.startswith("Updated Status:"):
+                                self.status = updated_status
+                                print(f"{BColors.DIM}DEBUG (Agent {self.name}): Status updated to: '{self.status}'{BColors.ENDC}", flush=True)
+                            else:
+                                print(f"{BColors.WARNING}WARN (Agent {self.name}): Status update chain returned invalid status '{updated_status}'. Using fallback.{BColors.ENDC}", flush=True)
+                                self.status = f"Just {action_text}" # Simple fallback
                         else:
                              print(f"{BColors.WARNING}WARN (Agent {self.name}): Status update chain returned empty. Using fallback.{BColors.ENDC}", flush=True)
                              self.status = f"Just {action_text}" # Simple fallback
@@ -301,74 +326,30 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                      reaction_output = "DO: (Error generating action)"
                      self.memory.add_memory("(Action) Error generating action.", now=call_time)
 
-
              elif reaction_type == "SAY":
                  try:
-                    # Utilize the base class's dialogue generation mechanism
-                    # This assumes _generate_reaction handles the core logic including memory adding
-                    # We might need to call a lower-level method if _generate_reaction isn't suitable
-                    # Let's try calling the internal _generate_reaction method if accessible
-                    # WARNING: Accessing protected methods (_*) is generally discouraged as they might change.
-                    # If this fails, we have to replicate the logic.
-                    if hasattr(self, '_generate_reaction'):
-                        print(f"{BColors.DIM}DEBUG (Agent {self.name}): Calling internal _generate_reaction for SAY.{BColors.ENDC}", flush=True)
-                        # _generate_reaction expects specific args and returns (importance, reaction)
-                        # We already have context, let's pass it
-                        # This internal method likely handles adding observation and response to memory.
-                        dialogue_important, dialogue_text = self._generate_reaction(
-                            observation, call_time, memory_context # Pass context needed by base method
-                        )
-                        print(f"{BColors.HEADER}DEBUG (Agent {self.name}): Generated dialogue: {dialogue_text}{BColors.ENDC}", flush=True)
-                        reaction_output = f"SAY: {dialogue_text}"
-                        # Ensure observation gets added if _generate_reaction doesn't
-                        # (It should, but as a fallback check)
-                        if not any(m.page_content == observation for m in self.memory.memory_retriever.vectorstore.docstore.search(observation)):
-                             print(f"{BColors.WARNING}WARN (Agent {self.name}): Observation memory might not have been added by _generate_reaction. Adding manually.{BColors.ENDC}")
-                             self.memory.add_memory(observation, now=call_time, importance=observation_poignancy)
+                    # Use the base class's generate_dialogue_response which handles memory addition
+                    # This is simpler than trying to call protected methods
+                    print(f"{BColors.DIM}DEBUG (Agent {self.name}): Calling super().generate_dialogue_response for SAY.{BColors.ENDC}", flush=True)
+                    dialogue_important_flag, dialogue_text = super().generate_dialogue_response(observation, call_time)
+                    # Note: dialogue_important_flag here relates to the *dialogue*, not the original observation poignancy.
+                    # We need to handle observation memory separately.
 
-                    else:
-                        # Fallback: Replicate simplified dialogue logic if _generate_reaction is not callable
-                        print(f"{BColors.WARNING}WARN (Agent {self.name}): _generate_reaction not accessible. Using fallback dialogue logic.{BColors.ENDC}")
-                        # This requires the dialogue prompt template from the base class or a similar one
-                        dialogue_prompt = PromptTemplate.from_template( # Example prompt structure
-                            "Summary of {agent_name}'s life: {agent_summary}\n"
-                            "Current time: {current_time}\n{agent_name}'s status: {agent_status}\n"
-                            "Relevant Memories: {memory_context}\n"
-                            "Observation: {observation}\n\n"
-                            "What would {agent_name} say? Output dialogue wrapped in quotes."
-                        )
-                        dialogue_chain = LLMChain(llm=self.llm, prompt=dialogue_prompt, verbose=self.verbose)
-                        dialogue_result = dialogue_chain.run(
-                             agent_name = self.name,
-                             agent_summary=agent_summary,
-                             current_time=current_time_str,
-                             memory_context=memory_context,
-                             agent_status=self.status,
-                             observation=observation
-                        ).strip()
-                        # Simple parsing
-                        if '"' in dialogue_result:
-                            dialogue_text = dialogue_result.split('"')[-2]
-                        else:
-                            dialogue_text = dialogue_result
-                        print(f"{BColors.HEADER}DEBUG (Agent {self.name}): Generated dialogue (fallback): {dialogue_text}{BColors.ENDC}", flush=True)
-                        # Manually add observation and response to memory
-                        self.memory.add_memory(observation, now=call_time, importance=observation_poignancy)
-                        memory_to_add = f'{self.name} said "{dialogue_text}"'
-                        self.memory.add_memory(memory_to_add, now=call_time)
-                        reaction_output = f"SAY: {dialogue_text}"
+                    print(f"{BColors.HEADER}DEBUG (Agent {self.name}): Generated dialogue: {dialogue_text}{BColors.ENDC}", flush=True)
+                    reaction_output = f"SAY: {dialogue_text}"
 
                  except Exception as e:
-                     print(f"{BColors.FAIL}ERROR (Agent {self.name}): Failed during SAY generation step: {e}. Defaulting to THINK.{BColors.ENDC}", flush=True)
+                     print(f"{BColors.FAIL}ERROR (Agent {self.name}): Failed during SAY generation step (super call): {e}. Defaulting to THINK.{BColors.ENDC}", flush=True)
                      reaction_output = "THINK: (Failed to formulate a verbal response)"
                      self.memory.add_memory("(Internal thought) Failed to formulate a verbal response.", now=call_time)
-                     # Add observation if important
-                     if add_observation_memory:
-                         self.memory.add_memory(observation, now=call_time, importance=observation_poignancy)
 
+             # Add the original observation memory if it crossed threshold OR if we reacted (THINK/DO/SAY)
+             if add_observation_memory or reaction_type != "IGNORE":
+                 print(f"{BColors.DIM}DEBUG (Agent {self.name}): Adding observation memory (Poignancy: {observation_poignancy}, Reaction: {reaction_type}).{BColors.ENDC}", flush=True)
+                 self.memory.add_memory(observation, now=call_time, importance=observation_poignancy)
 
-        # Determine overall importance: based on initial observation scoring OR if any reaction occurred
-        final_importance_flag = add_observation_memory or (reaction_type != "IGNORE")
+        # Final importance flag: based on initial observation scoring
+        final_importance_flag = add_observation_memory
         return (final_importance_flag, reaction_output)
 
 
@@ -377,15 +358,13 @@ class AutonomousGenerativeAgent(GenerativeAgent):
         """
         Overrides base method to use generate_reaction BUT only returns the spoken part
         if the reaction type was 'SAY'. Otherwise returns empty dialogue.
-        The boolean indicates if the original observation was deemed important enough to add to memory.
+        The boolean indicates if the original observation was deemed important based on its poignancy score.
         """
         observation_important, reaction_string = self.generate_reaction(observation, now)
 
         if reaction_string.startswith("SAY:"):
             dialogue = reaction_string[len("SAY:"):].strip()
-            # Ensure the observation memory was added if we are saying something
-            # The generate_reaction method should handle this, but double-check needed if complex
-            return observation_important, dialogue
+            return observation_important, dialogue # Return observation importance + dialogue
         else:
             # If the agent decided to THINK, DO, or IGNORE, return no dialogue.
             # The boolean still reflects the independent importance of the observation.
