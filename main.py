@@ -114,14 +114,16 @@ def _new_agent_instance(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed during FAISS setup: {e}")
 
-    print(f"DEBUG: Setting up GenerativeAgentMemory for agent '{name}'...", flush=True)
+     print(f"DEBUG: Setting up GenerativeAgentMemory for agent '{name}'...", flush=True)
     try:
-        actual_reflect = reflection_threshold if reflection_threshold > 0 else inf
-        actual_refresh = summary_refresh_seconds if summary_refresh_seconds > 0 else inf
+        # If reflection_threshold from input is 0 or less, pass None to GenerativeAgentMemory.
+        # The GenerativeAgentMemory itself handles None by setting a very high internal threshold (effectively infinity).
+        actual_reflect_for_memory = reflection_threshold if reflection_threshold > 0 else None
+        
         memory = GenerativeAgentMemory(
             llm=agent_llm,
             memory_retriever=retriever,
-            reflection_threshold=actual_reflect,
+            reflection_threshold=actual_reflect_for_memory, # Pass None if 0 or less
         )
         print(f"DEBUG: GenerativeAgentMemory setup complete for agent '{name}'.", flush=True)
     except Exception as e:
@@ -131,6 +133,10 @@ def _new_agent_instance(
 
     print(f"DEBUG: Initializing GenerativeAgent '{name}'...", flush=True)
     try:
+        # For GenerativeAgent, if summary_refresh_seconds from input is 0 or less, pass None.
+        # The GenerativeAgent class might also interpret None as "never refresh" or use a default.
+        actual_refresh_for_agent = summary_refresh_seconds if summary_refresh_seconds > 0 else None
+
         agent = GenerativeAgent(
             name=name,
             age=age,
@@ -138,7 +144,7 @@ def _new_agent_instance(
             status=status,
             memory=memory,
             llm=agent_llm,
-            summary_refresh_seconds=actual_refresh,
+            summary_refresh_seconds=actual_refresh_for_agent, # Pass None if 0 or less
             verbose=verbose,
         )
         print(f"DEBUG: GenerativeAgent '{name}' initialized successfully.", flush=True)
@@ -147,7 +153,6 @@ def _new_agent_instance(
         print(f"ERROR_STACKTRACE: Failed during GenerativeAgent initialization for agent '{name}': {e}", flush=True)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed during GenerativeAgent initialization: {e}")
-
 agents: Dict[str, GenerativeAgent] = {}
 
 # ——— Pydantic models ———————————————————————————————
