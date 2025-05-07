@@ -21,8 +21,9 @@ from langchain_experimental.generative_agents import (
 )
 from langchain_core.documents import Document
 from langchain_community.vectorstores.utils import DistanceStrategy
-from langchain.prompts import PromptTemplate # Added for custom memory
-from langchain_core.language_models.base import BaseLanguageModel # Added for custom memory type hinting
+from langchain.prompts import PromptTemplate
+from langchain_core.language_models.base import BaseLanguageModel
+from langchain.chains.llm import LLMChain # Needed for the chain in memory
 
 # ANSI Color Codes
 class BColors:
@@ -65,7 +66,6 @@ class CustomGenerativeAgentMemory(GenerativeAgentMemory):
         # Add crucial_importance_threshold if you use it, or other specific kwargs
         **kwargs: Any, # Catches other potential kwargs like 'callbacks'
     ):
-        # Ensure all necessary parameters for the base class are passed
         super().__init__(
             llm=llm,
             memory_retriever=memory_retriever,
@@ -73,8 +73,13 @@ class CustomGenerativeAgentMemory(GenerativeAgentMemory):
             reflection_threshold=reflection_threshold,
             **kwargs # Pass through any other relevant args
         )
-        # Store verbose for our own chains if needed, though base class handles it for self.chain
-        self.verbose = verbose
+        self.verbose = verbose # Store for local use if needed
+        # Re-initialize self.chain with the correct llm and verbose setting
+        # The base class initializes self.chain with a dummy prompt "{prompt}"
+        # We will use this existing chain but provide it a fully formatted prompt string.
+        # If you needed a different prompt structure for self.chain itself, you'd redefine it here.
+        # For this fix, we only need to ensure we're passing the correct input to self.chain.run()
+
 
     def _get_summary_of_relevant_context(
         self,
@@ -84,8 +89,9 @@ class CustomGenerativeAgentMemory(GenerativeAgentMemory):
         now: Optional[datetime] = None,
     ) -> str:
         """Summarize the relevant context of observations for an agent, with explicit observation."""
-        # print(f"{BColors.OKCYAN}DEBUG (CustomMemory): _get_summary_of_relevant_context called for {agent_name_alpha} and {agent_name_beta}{BColors.ENDC}", flush=True)
-        # print(f"{BColors.DIM}DEBUG (CustomMemory): Observation: {observation[:100]}...{BColors.ENDC}", flush=True)
+        # if self.verbose: # For debugging this specific method entry
+        #     print(f"{BColors.OKCYAN}DEBUG (CustomMemory): _get_summary_of_relevant_context called for {agent_name_alpha} and {agent_name_beta}{BColors.ENDC}", flush=True)
+        #     print(f"{BColors.DIM}DEBUG (CustomMemory): Observation: {observation[:100]}...{BColors.ENDC}", flush=True)
 
         relationship_query = f"{agent_name_alpha}'s relationship with {agent_name_beta}"
         relevant_memories = self.fetch_memories(relationship_query, now=now)
@@ -93,12 +99,12 @@ class CustomGenerativeAgentMemory(GenerativeAgentMemory):
         relevant_memories_string = self.aggregate_memories(
             relevant_memories, prefix=False
         )
-        # if self.verbose:
+        # if self.verbose: # For debugging memories
         #     print(f"{BColors.DIM}DEBUG (CustomMemory): Relevant memories string for relationship: {relevant_memories_string[:200]}...{BColors.ENDC}", flush=True)
 
 
         # THE MODIFIED PROMPT TEMPLATE
-        prompt = PromptTemplate.from_template(
+        prompt_template = PromptTemplate.from_template( # Renamed to prompt_template to avoid clash
             "You are an AI assistant analyzing the relationship between two entities based on a detailed observation and existing memories.\n\n"
             "Current Detailed Observation of the Scene (focus on descriptions of entities involved):\n"
             "\"\"\"\n{observation_text}\n\"\"\"\n\n"
@@ -115,19 +121,25 @@ class CustomGenerativeAgentMemory(GenerativeAgentMemory):
             "Provide a concise summary of this relationship analysis:\n"
             "Relationship Summary:"
         )
-        
-        # self.chain is an LLMChain initialized in the base class constructor
-        # It expects a 'prompt' argument which will be formatted with the other provided args.
-        # The dummy prompt is "{prompt}", so our prompt template will be used.
-        # If verbose is True for this memory instance, the base class's LLMChain will log.
-        result = self.chain(prompt).run(
+
+        # Format your detailed prompt template first
+        formatted_prompt_string = prompt_template.format(
             agent_name_alpha=agent_name_alpha,
             agent_name_beta=agent_name_beta,
-            observation_text=observation, # Crucially pass the observation here
-            relevant_memories=relevant_memories_string,
+            observation_text=observation, # Pass the observation here
+            relevant_memories=relevant_memories_string
+        )
+
+        # if self.verbose: # Add this for debugging the fully formatted prompt
+        #     print(f"{BColors.OKCYAN}DEBUG (CustomMemory): Fully Formatted Prompt for Relationship Chain:\n{formatted_prompt_string}{BColors.ENDC}", flush=True)
+
+        # self.chain is an LLMChain initialized in the base class constructor
+        # Its prompt template is just "{prompt}" and it expects one input variable 'prompt'.
+        result = self.chain.run(
+            prompt=formatted_prompt_string, # Pass the fully formatted string here
             callbacks=self.callbacks, # Pass callbacks if used by the chain
         )
-        # if self.verbose:
+        # if self.verbose: # For debugging the result
         #     print(f"{BColors.OKBLUE}DEBUG (CustomMemory): Relationship summary result: {result}{BColors.ENDC}", flush=True)
         return result
 # --- End of Custom Generative Agent Memory ---
@@ -208,23 +220,22 @@ def _new_agent_instance(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed during FAISS setup: {e}")
 
-    print(f"{BColors.DIM}DEBUG: Setting up CustomGenerativeAgentMemory for agent '{name}'...{BColors.ENDC}", flush=True) # MODIFIED
+    print(f"{BColors.DIM}DEBUG: Setting up CustomGenerativeAgentMemory for agent '{name}'...{BColors.ENDC}", flush=True)
     try:
         actual_reflect_for_memory = reflection_threshold if reflection_threshold > 0 else None
         print(f"{BColors.DIM}DEBUG: actual_reflect_for_memory (for CustomGenerativeAgentMemory) will be: {actual_reflect_for_memory}{BColors.ENDC}", flush=True)
 
-        memory = CustomGenerativeAgentMemory( # MODIFIED HERE
+        memory = CustomGenerativeAgentMemory(
             llm=agent_llm,
             memory_retriever=retriever,
             reflection_threshold=actual_reflect_for_memory,
-            verbose=verbose, # Pass verbose to the custom memory class
-            # If you use callbacks, pass them here: callbacks=your_callbacks_instance,
+            verbose=verbose,
         )
-        print(f"{BColors.OKGREEN}DEBUG: CustomGenerativeAgentMemory setup complete for agent '{name}'.{BColors.ENDC}", flush=True) # MODIFIED
+        print(f"{BColors.OKGREEN}DEBUG: CustomGenerativeAgentMemory setup complete for agent '{name}'.{BColors.ENDC}", flush=True)
     except Exception as e:
-        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during CustomGenerativeAgentMemory setup for agent '{name}': {e}{BColors.ENDC}", flush=True) # MODIFIED
+        print(f"{BColors.FAIL}ERROR_STACKTRACE: Failed during CustomGenerativeAgentMemory setup for agent '{name}': {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed during CustomGenerativeAgentMemory setup: {e}") # MODIFIED
+        raise HTTPException(status_code=500, detail=f"Failed during CustomGenerativeAgentMemory setup: {e}")
 
     print(f"{BColors.DIM}DEBUG: Initializing GenerativeAgent '{name}'...{BColors.ENDC}", flush=True)
     try:
@@ -236,7 +247,7 @@ def _new_agent_instance(
             age=age,
             traits=traits,
             status=status,
-            memory=memory, # This is now an instance of CustomGenerativeAgentMemory
+            memory=memory,
             llm=agent_llm,
             summary_refresh_seconds=actual_refresh_for_agent,
             verbose=verbose,
