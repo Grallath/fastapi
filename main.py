@@ -96,7 +96,7 @@ def _new_agent_instance( # Keep function signature the same
             docstore=InMemoryDocstore({}),
             index_to_docstore_id={},
             normalize_L2=True, # Normalize vectors for IP distance
-            distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT # Use MAX_INNER_PRODUCT for IP
+            distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT # Use IP strategy
         )
         # Consider adjusting decay_rate and k based on experimentation
         retriever = TimeWeightedVectorStoreRetriever(
@@ -192,7 +192,6 @@ class UpdateStatusReq(BaseModel):
 
 # --- Endpoints ---
 
-# /agents POST (create_agent) uses the modified _new_agent_instance
 @app.post("/agents", status_code=201)
 def create_agent(req: CreateAgentReq):
     print(f"{BColors.HEADER}DEBUG: /agents POST request received: {req.model_dump_json(exclude_none=True)}{BColors.ENDC}", flush=True)
@@ -259,7 +258,6 @@ def create_agent(req: CreateAgentReq):
                  and hasattr(retrieved_agent.memory.memory_retriever.vectorstore.embedding_function, 'model')):
                  embedding_model_used = retrieved_agent.memory.memory_retriever.vectorstore.embedding_function.model
 
-
     print(f"{BColors.OKGREEN}DEBUG: Agent '{BColors.BOLD}{aid}{BColors.ENDC}{BColors.OKGREEN}' creation processing complete. LLM: {llm_model_used}, Embedding: {embedding_model_used}. Responding.{BColors.ENDC}", flush=True)
     return {
         "agent_id": aid,
@@ -269,7 +267,6 @@ def create_agent(req: CreateAgentReq):
     }
 
 
-# /agents GET (list_agents) remains the same
 @app.get("/agents")
 def list_agents():
     print(f"{BColors.HEADER}DEBUG: /agents GET request received (list_agents){BColors.ENDC}", flush=True)
@@ -307,7 +304,6 @@ def list_agents():
     return {"agents": agent_details}
 
 
-# /update_status POST remains the same
 @app.post("/agents/{agent_id}/update_status")
 def update_agent_status(agent_id: str, req: UpdateStatusReq):
     print(f"{BColors.HEADER}>>> Incoming Update Status Request for Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} <<<", flush=True)
@@ -337,7 +333,6 @@ def update_agent_status(agent_id: str, req: UpdateStatusReq):
     return {"agent_id": agent_id, "status": agent.status}
 
 
-# --- MODIFIED /generate_response Endpoint ---
 @app.post("/agents/{agent_id}/generate_response", response_model=GenerateReactionResponse)
 def generate_response(agent_id: str, req: GenerateResponseReq):
     # Use 'prompt' from the request model as the observation
@@ -415,7 +410,7 @@ def generate_response(agent_id: str, req: GenerateResponseReq):
         observation_was_important=observation_was_important
     )
 
-# /add_memory POST remains the same
+
 @app.post("/agents/{agent_id}/add_memory")
 def add_memory(agent_id: str, req: AddMemoryReq):
     print(f"{BColors.HEADER}DEBUG: /add_memory for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} with text: '{req.text_to_memorize[:50]}...'{BColors.ENDC}", flush=True)
@@ -431,6 +426,10 @@ def add_memory(agent_id: str, req: AddMemoryReq):
     agent = agents[agent_id]
     try:
         # Use the memory object associated with the agent
+        if not agent.memory:
+             print(f"{BColors.FAIL}ERROR: Agent {agent_id} memory object is None.{BColors.ENDC}", flush=True)
+             raise HTTPException(status_code=500, detail=f"Agent {agent_id} memory not initialized.")
+
         agent.memory.add_memory(text_to_add, now=datetime.now())
         print(f"{BColors.OKGREEN}DEBUG: Memory added successfully for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}.{BColors.ENDC}", flush=True)
     except Exception as e:
@@ -440,7 +439,7 @@ def add_memory(agent_id: str, req: AddMemoryReq):
 
     return {"status": "success", "added_memory": text_to_add}
 
-# /fetch_memories POST remains the same, but uses the updated memory structure if applicable
+
 @app.post("/agents/{agent_id}/fetch_memories")
 def fetch_memories(agent_id: str, req: FetchMemoriesReq):
     print(f"{BColors.HEADER}>>> Incoming Fetch Memories Request for Agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} <<<", flush=True)
@@ -456,6 +455,10 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
         raise HTTPException(status_code=400, detail="Observation text may not be empty for fetching memories.")
 
     agent = agents[agent_id]
+    if not agent.memory or not agent.memory.memory_retriever:
+         print(f"{BColors.FAIL}ERROR: Agent {agent_id} memory or retriever not initialized.{BColors.ENDC}", flush=True)
+         raise HTTPException(status_code=500, detail=f"Agent {agent_id} memory/retriever not initialized.")
+
     original_k = -1
     retriever = agent.memory.memory_retriever
     if hasattr(retriever, 'k'):
@@ -474,32 +477,42 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
             else:
                 print(f"{BColors.WARNING}WARN: Cannot set k for agent {agent_id}; retriever does not have 'k' attribute.{BColors.ENDC}", flush=True)
 
-        # Fetch memories using the agent's built-in method which uses the retriever
-        # Now returns Document objects directly
-        retrieved_docs_only: List[Document] = agent.fetch_memories(observation, now=datetime.now())
+        # Fetch memories using the agent's memory object method
+        # This method should handle the retriever interaction correctly
+        retrieved_docs_only: List[Document] = agent.memory.fetch_memories(observation, now=datetime.now())
 
         # Manually get scores if needed (requires vectorstore access)
         docs_and_scores: List[Tuple[Document, float]] = []
-        if hasattr(agent.memory.memory_retriever, "vectorstore") and \
-           hasattr(agent.memory.memory_retriever.vectorstore, "similarity_search_with_relevance_scores"):
+        # Check if the necessary components exist before trying similarity search
+        if (hasattr(agent.memory.memory_retriever, "vectorstore") and
+            agent.memory.memory_retriever.vectorstore is not None and
+            hasattr(agent.memory.memory_retriever.vectorstore, "similarity_search_with_relevance_scores")):
             print(f"{BColors.DIM}DEBUG: Fetching scores using similarity_search_with_relevance_scores for agent {agent_id}.{BColors.ENDC}", flush=True)
-            # Fetch again with scores using the vectorstore directly
-            docs_and_scores = agent.memory.memory_retriever.vectorstore.similarity_search_with_relevance_scores(
-                observation,
-                k=requested_k, # Use the potentially overridden k
-            )
-            # We might get more docs here than fetch_memories returned if fetch_memories does extra filtering.
-            # Match based on content if necessary, or just use the scored list.
-            # For simplicity, we'll use the scored list directly.
+            try:
+                docs_and_scores = agent.memory.memory_retriever.vectorstore.similarity_search_with_relevance_scores(
+                    observation,
+                    k=requested_k, # Use the potentially overridden k
+                )
+            except Exception as sim_exc:
+                 print(f"{BColors.WARNING}WARN: similarity_search_with_relevance_scores failed: {sim_exc}. Assigning 0.0 scores.{BColors.ENDC}", flush=True)
+                 docs_and_scores = [(doc, 0.0) for doc in retrieved_docs_only]
         else:
             print(f"{BColors.WARNING}WARN: Cannot get relevance scores reliably for agent {agent_id}. Scores will be 0.0.{BColors.ENDC}", flush=True)
             docs_and_scores = [(doc, 0.0) for doc in retrieved_docs_only] # Assign 0 score if cannot fetch properly
 
         # Prepare response payload
         for doc, score in docs_and_scores:
+            # Ensure metadata is serializable (convert datetime etc. if necessary)
+            serializable_metadata = {}
+            for k, v in doc.metadata.items():
+                if isinstance(v, datetime):
+                    serializable_metadata[k] = v.isoformat()
+                else:
+                    serializable_metadata[k] = v
+
             retrieved_docs_for_response_payload.append({
                 "content": doc.page_content,
-                "metadata": doc.metadata, # Include all metadata
+                "metadata": serializable_metadata, # Use serializable metadata
                 "relevance_score": score
             })
 
@@ -515,16 +528,20 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
                 last_accessed_at_raw = doc.metadata.get('last_accessed_at')
                 buffer_idx = doc.metadata.get('buffer_idx', 'N/A')
 
-                created_at_str = created_at_raw.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created_at_raw, 'strftime') else str(created_at_raw)
-                last_accessed_at_str = last_accessed_at_raw.strftime("%Y-%m-%d %H:%M:%S") if hasattr(last_accessed_at_raw, 'strftime') else str(last_accessed_at_raw)
+                # Use ISO format for display if datetime object
+                created_at_str = created_at_raw.isoformat() if isinstance(created_at_raw, datetime) else str(created_at_raw)
+                last_accessed_at_str = last_accessed_at_raw.isoformat() if isinstance(last_accessed_at_raw, datetime) else str(last_accessed_at_raw)
+
 
                 importance_color = BColors.IMPORTANCE_LOW
                 if importance >= 0.7: importance_color = BColors.IMPORTANCE_HIGH
                 elif importance >= 0.4: importance_color = BColors.IMPORTANCE_MEDIUM
 
                 relevance_color = BColors.IMPORTANCE_LOW
-                if score >= 0.7: relevance_color = BColors.IMPORTANCE_HIGH
-                elif score >= 0.4: relevance_color = BColors.IMPORTANCE_MEDIUM
+                # Note: MAX_INNER_PRODUCT scores are different from cosine similarity (higher is better, range can exceed 1)
+                # Adjust relevance coloring thresholds if needed based on observed scores
+                if score >= 0.8: relevance_color = BColors.IMPORTANCE_HIGH # Example thresholds for IP
+                elif score >= 0.7: relevance_color = BColors.IMPORTANCE_MEDIUM
 
                 print(f"{BColors.SEPARATOR}{'-'*70}{BColors.ENDC}", flush=True)
                 print(f"{BColors.BOLD}Memory #{i+1}:{BColors.ENDC}", flush=True)
@@ -561,7 +578,6 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
     return {"memories": retrieved_docs_for_response_payload }
 
 
-# /summary GET remains the same
 @app.get("/agents/{agent_id}/summary")
 def get_summary(agent_id: str):
     print(f"{BColors.HEADER}DEBUG: /summary GET request for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER}", flush=True)
@@ -578,13 +594,14 @@ def get_summary(agent_id: str):
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error generating summary for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
-        # Don't raise HTTPException here, return the error message in the response
+        # Return the error message in the response payload
         summary_text = f"Error generating summary: {e}"
+        # Optionally raise HTTP 500 if summary generation is critical
+        # raise HTTPException(status_code=500, detail=f"Error generating summary: {e}")
 
     return {"agent_id": agent_id, "summary": summary_text}
 
 
-# /delete_agent DELETE remains the same
 @app.delete("/agents/{agent_id}")
 def delete_agent(agent_id: str):
     print(f"{BColors.HEADER}DEBUG: /delete_agent DELETE request for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER}", flush=True)
@@ -595,18 +612,20 @@ def delete_agent(agent_id: str):
     # Explicitly delete agent object to potentially help GC, then remove from dict
     try:
         agent_instance = agents.pop(agent_id)
+        # Optional: Clean up resources if the agent held any explicitly (e.g., files)
         del agent_instance # Hint to GC
         print(f"{BColors.OKGREEN}DEBUG: Agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}' deleted successfully.{BColors.ENDC}", flush=True)
     except KeyError:
         # Should not happen if initial check passes, but handle defensively
         print(f"{BColors.FAIL}ERROR: Agent '{agent_id}' was not in the dictionary during deletion attempt.{BColors.ENDC}", flush=True)
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found during deletion.") # Should be 404 still
+        # Already checked, so this implies a race condition or logic error, but 404 is still appropriate
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found during deletion.")
     except Exception as e:
         # Catch unexpected errors during deletion
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Unexpected error deleting agent {agent_id}: {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
-        # Put the agent back if deletion failed unexpectedly? Or just report error?
-        # Let's report error and leave it potentially removed from dict.
+        # Put the agent back if deletion failed unexpectedly? Risky.
+        # Better to report error and leave it removed from the active dict.
         raise HTTPException(status_code=500, detail=f"Unexpected error deleting agent: {e}")
 
     return {"deleted_agent_id": agent_id, "status": "success"}
@@ -615,8 +634,8 @@ def delete_agent(agent_id: str):
 print(f"{BColors.OKGREEN}DEBUG: FastAPI application finished loading. (Using Autonomous Agents){BColors.ENDC}", flush=True)
 
 # To run this:
-# 1. Save the first code block as `custom_agent.py`
-# 2. Save the second code block as `main.py`
-# 3. Ensure you have the necessary libraries installed (`fastapi`, `uvicorn`, `langchain-openai`, `langchain_experimental`, `faiss-cpu` or `faiss-gpu`, `numpy`, `langchain`)
-# 4. Set your `OPENAI_API_KEY` environment variable.
-# 5. Run with `uvicorn main:app --reload`
+# 1. Save the first code block (corrected custom_agent.py) as `custom_agent.py`
+# 2. Save this second code block as `main.py` in the same directory.
+# 3. Ensure requirements are installed: fastapi, uvicorn, langchain-openai, langchain_experimental, faiss-cpu (or faiss-gpu), numpy, langchain
+# 4. Set `OPENAI_API_KEY`.
+# 5. Run: `uvicorn main:app --reload`
