@@ -163,7 +163,7 @@ class CreateAgentReq(BaseModel):
     status: str
     agent_id: Optional[str] = None
     summary_refresh_seconds: int = Field(default=3600, ge=0) # Default to 1 hour
-    reflection_threshold: int = Field(default=8, ge=0) # Default reflection threshold (adjust as needed)
+    reflection_threshold: int = Field(default=0, ge=0) # Default 0 = disabled (API expects int)
     verbose: bool = False
     model_name: Optional[str] = None
     embedding_model_name: Optional[str] = None
@@ -203,14 +203,13 @@ def create_agent(req: CreateAgentReq):
     current_agent_instance = None
     try:
         print(f"{BColors.DIM}DEBUG: Calling _new_agent_instance for agent_id '{aid}' with name '{req.name}'{BColors.ENDC}", flush=True)
-        # This now calls the function that returns AutonomousGenerativeAgent
         current_agent_instance = _new_agent_instance(
             name=req.name,
             age=req.age,
             traits=req.traits,
             status=req.status,
             summary_refresh_seconds=req.summary_refresh_seconds,
-            reflection_threshold=req.reflection_threshold,
+            reflection_threshold=req.reflection_threshold, # Pass int
             verbose=req.verbose,
             llm_model_name=req.model_name,
             embedding_model_name=req.embedding_model_name
@@ -218,16 +217,12 @@ def create_agent(req: CreateAgentReq):
         agents[aid] = current_agent_instance
         print(f"{BColors.OKGREEN}DEBUG: Agent '{BColors.BOLD}{aid}{BColors.ENDC}{BColors.OKGREEN}' (name: '{req.name}') created and stored.{BColors.ENDC}", flush=True)
     except HTTPException as http_exc:
-        # Re-raise known HTTP exceptions from _new_agent_instance
         print(f"{BColors.WARNING}DEBUG: HTTPException caught in create_agent for agent_id '{aid}': {http_exc.detail}{BColors.ENDC}", flush=True)
         raise http_exc
     except Exception as e:
-        # Catch unexpected errors during creation
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Unexpected error in create_agent endpoint for agent_id '{aid}': {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
-        # Clean up if agent was partially added
-        if aid in agents:
-            del agents[aid]
+        if aid in agents: del agents[aid]
         raise HTTPException(status_code=500, detail=f"Unexpected server error during agent creation: {e}")
 
     # --- Get model names used ---
@@ -245,12 +240,9 @@ def create_agent(req: CreateAgentReq):
             hasattr(current_agent_instance.memory.memory_retriever.vectorstore.embedding_function, 'model')):
             embedding_model_used = current_agent_instance.memory.memory_retriever.vectorstore.embedding_function.model
     else:
-        # This case should ideally not happen if exceptions are handled correctly
         print(f"{BColors.FAIL}ERROR: current_agent_instance is None after creation attempt for agent_id '{aid}'. This indicates a logic flaw.{BColors.ENDC}", flush=True)
-        # Attempt to retrieve if somehow added to dict but not returned
         if aid in agents and agents[aid] is not None:
              retrieved_agent = agents[aid]
-             # Attempt to get models from stored agent
              if hasattr(retrieved_agent, 'llm') and retrieved_agent.llm and hasattr(retrieved_agent.llm, 'model_name'):
                  llm_model_used = retrieved_agent.llm.model_name
              if (hasattr(retrieved_agent, 'memory') and hasattr(retrieved_agent.memory, 'memory_retriever') and
@@ -316,14 +308,13 @@ def update_agent_status(agent_id: str, req: UpdateStatusReq):
     agent = agents[agent_id]
 
     try:
-        # Basic validation/stripping
         new_status_stripped = req.new_status.strip()
         if not new_status_stripped:
             raise HTTPException(status_code=400, detail="New status cannot be empty.")
         agent.status = new_status_stripped
         print(f"{BColors.OKGREEN}SUCCESS: Agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}' status updated to: '{agent.status}'{BColors.ENDC}", flush=True)
     except HTTPException as e:
-        raise e # Re-raise validation errors
+        raise e
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error updating status for agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.FAIL}': {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
@@ -335,7 +326,6 @@ def update_agent_status(agent_id: str, req: UpdateStatusReq):
 
 @app.post("/agents/{agent_id}/generate_response", response_model=GenerateReactionResponse)
 def generate_response(agent_id: str, req: GenerateResponseReq):
-    # Use 'prompt' from the request model as the observation
     observation = req.prompt.strip()
     print(f"{BColors.HEADER}DEBUG: /generate_response for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.HEADER} with observation: '{observation[:50]}...' (K={req.k or 'default'}){BColors.ENDC}", flush=True)
     if agent_id not in agents or agents[agent_id] is None:
@@ -350,15 +340,13 @@ def generate_response(agent_id: str, req: GenerateResponseReq):
     original_k = -1
     retriever = agent.memory.memory_retriever
     if hasattr(retriever, 'k'):
-         original_k = retriever.k # Backup original K
+         original_k = retriever.k
     else:
-        # This shouldn't happen with TimeWeightedVectorStoreRetriever but check anyway
         print(f"{BColors.WARNING}WARN: Agent {agent_id} retriever missing k attribute for k value backup in generate_response.{BColors.ENDC}", flush=True)
 
     reaction_string = ""
     observation_was_important = False
     try:
-        # Temporarily set K if requested
         if req.k is not None and req.k > 0:
             if hasattr(retriever, 'k'):
                 retriever.k = req.k
@@ -377,7 +365,6 @@ def generate_response(agent_id: str, req: GenerateResponseReq):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error during reaction generation: {e}")
     finally:
-        # Restore original K value
         if original_k != -1 and hasattr(retriever, 'k'):
              retriever.k = original_k
              print(f"{BColors.DIM}DEBUG: Restored retriever k to {original_k} for agent {agent_id}.{BColors.ENDC}", flush=True)
@@ -395,13 +382,12 @@ def generate_response(agent_id: str, req: GenerateResponseReq):
     elif reaction_string.startswith("DO:"):
         reaction_type = "DO"
         content = reaction_string[len("DO:"):].strip()
-    elif not reaction_string: # Empty string means ignore
+    elif not reaction_string:
         reaction_type = "IGNORE"
         content = ""
     else:
-        # Should not happen if generate_reaction works correctly
         print(f"{BColors.WARNING}WARN: Unexpected reaction string format from agent {agent_id}: '{reaction_string}'. Setting type to UNKNOWN.{BColors.ENDC}", flush=True)
-        content = reaction_string # Pass through raw string if unknown
+        content = reaction_string
 
     return GenerateReactionResponse(
         agent_name=agent.name,
@@ -425,11 +411,11 @@ def add_memory(agent_id: str, req: AddMemoryReq):
 
     agent = agents[agent_id]
     try:
-        # Use the memory object associated with the agent
         if not agent.memory:
              print(f"{BColors.FAIL}ERROR: Agent {agent_id} memory object is None.{BColors.ENDC}", flush=True)
              raise HTTPException(status_code=500, detail=f"Agent {agent_id} memory not initialized.")
 
+        # Add memory using the agent's memory object
         agent.memory.add_memory(text_to_add, now=datetime.now())
         print(f"{BColors.OKGREEN}DEBUG: Memory added successfully for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}.{BColors.ENDC}", flush=True)
     except Exception as e:
@@ -462,28 +448,25 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
     original_k = -1
     retriever = agent.memory.memory_retriever
     if hasattr(retriever, 'k'):
-        original_k = retriever.k # Backup K
+        original_k = retriever.k
 
     retrieved_docs_for_response_payload: List[Dict[str, Any]] = []
 
     try:
-        # Temporarily set K if requested
-        requested_k = retriever.k # Start with default
+        requested_k = retriever.k
         if req.k is not None and req.k > 0:
             if hasattr(retriever, 'k'):
                 requested_k = req.k
-                retriever.k = requested_k # Set temporary K
+                retriever.k = requested_k
                 print(f"{BColors.DIM}DEBUG: Temporarily set retriever k to {req.k} for fetch_memories.{BColors.ENDC}", flush=True)
             else:
                 print(f"{BColors.WARNING}WARN: Cannot set k for agent {agent_id}; retriever does not have 'k' attribute.{BColors.ENDC}", flush=True)
 
-        # Fetch memories using the agent's memory object method
-        # This method should handle the retriever interaction correctly
+        # Use the memory's fetch method
         retrieved_docs_only: List[Document] = agent.memory.fetch_memories(observation, now=datetime.now())
 
-        # Manually get scores if needed (requires vectorstore access)
+        # Get scores separately if possible
         docs_and_scores: List[Tuple[Document, float]] = []
-        # Check if the necessary components exist before trying similarity search
         if (hasattr(agent.memory.memory_retriever, "vectorstore") and
             agent.memory.memory_retriever.vectorstore is not None and
             hasattr(agent.memory.memory_retriever.vectorstore, "similarity_search_with_relevance_scores")):
@@ -491,32 +474,38 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
             try:
                 docs_and_scores = agent.memory.memory_retriever.vectorstore.similarity_search_with_relevance_scores(
                     observation,
-                    k=requested_k, # Use the potentially overridden k
+                    k=requested_k,
                 )
             except Exception as sim_exc:
                  print(f"{BColors.WARNING}WARN: similarity_search_with_relevance_scores failed: {sim_exc}. Assigning 0.0 scores.{BColors.ENDC}", flush=True)
                  docs_and_scores = [(doc, 0.0) for doc in retrieved_docs_only]
         else:
             print(f"{BColors.WARNING}WARN: Cannot get relevance scores reliably for agent {agent_id}. Scores will be 0.0.{BColors.ENDC}", flush=True)
-            docs_and_scores = [(doc, 0.0) for doc in retrieved_docs_only] # Assign 0 score if cannot fetch properly
+            docs_and_scores = [(doc, 0.0) for doc in retrieved_docs_only]
 
         # Prepare response payload
         for doc, score in docs_and_scores:
-            # Ensure metadata is serializable (convert datetime etc. if necessary)
             serializable_metadata = {}
             for k, v in doc.metadata.items():
                 if isinstance(v, datetime):
                     serializable_metadata[k] = v.isoformat()
+                # Add handling for other non-serializable types if necessary
+                elif isinstance(v, np.ndarray):
+                    serializable_metadata[k] = v.tolist() # Example for numpy arrays
+                elif isinstance(v, (np.float32, np.float64)):
+                     serializable_metadata[k] = float(v) # Convert numpy floats
+                elif isinstance(v, (np.int32, np.int64)):
+                     serializable_metadata[k] = int(v) # Convert numpy ints
                 else:
                     serializable_metadata[k] = v
 
             retrieved_docs_for_response_payload.append({
                 "content": doc.page_content,
-                "metadata": serializable_metadata, # Use serializable metadata
+                "metadata": serializable_metadata,
                 "relevance_score": score
             })
 
-        # --- Detailed Logging (same as before) ---
+        # --- Detailed Logging ---
         print(f"\n{BColors.OKBLUE}--- Detailed Fetched Memories (Agent: {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKBLUE}) ---{BColors.ENDC}", flush=True)
         if not docs_and_scores:
             print(f"{BColors.WARNING}No memories were fetched for this observation.{BColors.ENDC}", flush=True)
@@ -527,22 +516,14 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
                 created_at_raw = doc.metadata.get('created_at')
                 last_accessed_at_raw = doc.metadata.get('last_accessed_at')
                 buffer_idx = doc.metadata.get('buffer_idx', 'N/A')
-
-                # Use ISO format for display if datetime object
                 created_at_str = created_at_raw.isoformat() if isinstance(created_at_raw, datetime) else str(created_at_raw)
                 last_accessed_at_str = last_accessed_at_raw.isoformat() if isinstance(last_accessed_at_raw, datetime) else str(last_accessed_at_raw)
-
-
                 importance_color = BColors.IMPORTANCE_LOW
                 if importance >= 0.7: importance_color = BColors.IMPORTANCE_HIGH
                 elif importance >= 0.4: importance_color = BColors.IMPORTANCE_MEDIUM
-
                 relevance_color = BColors.IMPORTANCE_LOW
-                # Note: MAX_INNER_PRODUCT scores are different from cosine similarity (higher is better, range can exceed 1)
-                # Adjust relevance coloring thresholds if needed based on observed scores
-                if score >= 0.8: relevance_color = BColors.IMPORTANCE_HIGH # Example thresholds for IP
+                if score >= 0.8: relevance_color = BColors.IMPORTANCE_HIGH
                 elif score >= 0.7: relevance_color = BColors.IMPORTANCE_MEDIUM
-
                 print(f"{BColors.SEPARATOR}{'-'*70}{BColors.ENDC}", flush=True)
                 print(f"{BColors.BOLD}Memory #{i+1}:{BColors.ENDC}", flush=True)
                 print(f"  {BColors.METADATA_KEY}Relevance Score:{BColors.ENDC} {relevance_color}{score:.4f}{BColors.ENDC}", flush=True)
@@ -552,24 +533,28 @@ def fetch_memories(agent_id: str, req: FetchMemoriesReq):
                 print(f"    {BColors.METADATA_KEY}Created At:{BColors.ENDC} {BColors.METADATA_VALUE}{created_at_str}{BColors.ENDC}", flush=True)
                 print(f"    {BColors.METADATA_KEY}Last Accessed:{BColors.ENDC} {BColors.METADATA_VALUE}{last_accessed_at_str}{BColors.ENDC}", flush=True)
                 print(f"    {BColors.METADATA_KEY}Buffer Idx:{BColors.ENDC} {BColors.METADATA_VALUE}{buffer_idx}{BColors.ENDC}", flush=True)
-                # Print other metadata if present
                 other_meta = {k: v for k, v in doc.metadata.items() if k not in ['importance', 'created_at', 'last_accessed_at', 'buffer_idx']}
                 if other_meta:
-                    print(f"    {BColors.METADATA_KEY}Other Meta:{BColors.ENDC} {BColors.METADATA_VALUE}{other_meta}{BColors.ENDC}", flush=True)
+                    # Attempt to display other meta, converting non-serializable if known
+                    display_meta = {}
+                    for mk, mv in other_meta.items():
+                         if isinstance(mv, np.ndarray): display_meta[mk] = mv.tolist()
+                         elif isinstance(mv, (np.float32, np.float64)): display_meta[mk] = float(mv)
+                         elif isinstance(mv, (np.int32, np.int64)): display_meta[mk] = int(mv)
+                         else: display_meta[mk] = mv
+                    print(f"    {BColors.METADATA_KEY}Other Meta:{BColors.ENDC} {BColors.METADATA_VALUE}{display_meta}{BColors.ENDC}", flush=True)
 
         if docs_and_scores:
             print(f"{BColors.SEPARATOR}{'-'*70}{BColors.ENDC}", flush=True)
         print(f"{BColors.OKBLUE}--- End of Detailed Fetched Memories ---{BColors.ENDC}\n", flush=True)
 
-
     except HTTPException as e:
-        raise e # Re-raise validation errors
+        raise e
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error fetching memories for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error fetching memories: {e}")
     finally:
-        # Restore original K value
         if original_k != -1 and hasattr(retriever, 'k'):
              retriever.k = original_k
              print(f"{BColors.DIM}DEBUG: Restored retriever k to {original_k} for fetch_memories.{BColors.ENDC}", flush=True)
@@ -588,15 +573,13 @@ def get_summary(agent_id: str):
     agent = agents[agent_id]
     summary_text = "Error generating summary."
     try:
-        # Force refresh to get the latest summary based on current memories
         summary_text = agent.get_summary(force_refresh=True)
         print(f"{BColors.OKGREEN}DEBUG: Summary generated successfully for agent {BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}.{BColors.ENDC}", flush=True)
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error generating summary for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
-        # Return the error message in the response payload
         summary_text = f"Error generating summary: {e}"
-        # Optionally raise HTTP 500 if summary generation is critical
+        # Consider raising HTTPException if summary failure is critical
         # raise HTTPException(status_code=500, detail=f"Error generating summary: {e}")
 
     return {"agent_id": agent_id, "summary": summary_text}
@@ -609,23 +592,16 @@ def delete_agent(agent_id: str):
         print(f"{BColors.FAIL}ERROR: Agent '{agent_id}' not found for delete_agent.{BColors.ENDC}", flush=True)
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found.")
 
-    # Explicitly delete agent object to potentially help GC, then remove from dict
     try:
         agent_instance = agents.pop(agent_id)
-        # Optional: Clean up resources if the agent held any explicitly (e.g., files)
-        del agent_instance # Hint to GC
+        del agent_instance
         print(f"{BColors.OKGREEN}DEBUG: Agent '{BColors.BOLD}{agent_id}{BColors.ENDC}{BColors.OKGREEN}' deleted successfully.{BColors.ENDC}", flush=True)
     except KeyError:
-        # Should not happen if initial check passes, but handle defensively
         print(f"{BColors.FAIL}ERROR: Agent '{agent_id}' was not in the dictionary during deletion attempt.{BColors.ENDC}", flush=True)
-        # Already checked, so this implies a race condition or logic error, but 404 is still appropriate
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found during deletion.")
     except Exception as e:
-        # Catch unexpected errors during deletion
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Unexpected error deleting agent {agent_id}: {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
-        # Put the agent back if deletion failed unexpectedly? Risky.
-        # Better to report error and leave it removed from the active dict.
         raise HTTPException(status_code=500, detail=f"Unexpected error deleting agent: {e}")
 
     return {"deleted_agent_id": agent_id, "status": "success"}
@@ -633,9 +609,4 @@ def delete_agent(agent_id: str):
 
 print(f"{BColors.OKGREEN}DEBUG: FastAPI application finished loading. (Using Autonomous Agents){BColors.ENDC}", flush=True)
 
-# To run this:
-# 1. Save the first code block (corrected custom_agent.py) as `custom_agent.py`
-# 2. Save this second code block as `main.py` in the same directory.
-# 3. Ensure requirements are installed: fastapi, uvicorn, langchain-openai, langchain_experimental, faiss-cpu (or faiss-gpu), numpy, langchain
-# 4. Set `OPENAI_API_KEY`.
-# 5. Run: `uvicorn main:app --reload`
+# Run with: uvicorn main:app --reload
