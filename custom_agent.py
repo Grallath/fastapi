@@ -40,6 +40,8 @@ class AutonomousGenerativeAgent(GenerativeAgent):
     thought_chain: Optional[LLMChain] = None
     action_chain: Optional[LLMChain] = None
     status_update_chain: Optional[LLMChain] = None # Optional: for updating status after DO
+    cached_summary: Optional[str] = None  # Cache for the summary to avoid duplicate generation
+    cached_summary_time: Optional[datetime] = None  # When the summary was last generated
 
     def _initialize_chains(self):
         """Initialize the specific chains needed for autonomous reactions."""
@@ -125,7 +127,7 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                  template=status_update_template
              )
              self.status_update_chain = LLMChain(llm=self.llm, prompt=status_update_prompt, verbose=self.verbose)
-             print(f"{BColors.DIM}DEBUG (Agent {self.name}): Status Update chain initialized.{BColors.ENDC}")
+             print(f"{BColors.DIM}DEBUG (Agent {self.name}): Status update chain initialized.{BColors.ENDC}")
 
 
     def _fetch_context(self, observation: str, now: Optional[datetime] = None) -> Tuple[str, str]:
@@ -154,6 +156,26 @@ class AutonomousGenerativeAgent(GenerativeAgent):
         current_time_str = (now or datetime.now()).strftime("%B %d, %Y, %I:%M:%S %p")
         return memory_context, current_time_str
 
+    # Override get_summary to use our cached version during a single reaction generation
+    def get_summary(self, force_refresh: bool = False, now: Optional[datetime] = None) -> str:
+        """Return a descriptive summary of the agent, using cache when appropriate."""
+        current_time = now or datetime.now()
+        
+        # If we have a cached summary from the same reaction cycle, use it
+        if (not force_refresh and 
+            self.cached_summary is not None and 
+            self.cached_summary_time is not None and
+            (current_time - self.cached_summary_time).total_seconds() < 1.0):  # Use cache if less than 1 second old
+            return self.cached_summary
+            
+        # Otherwise, get a fresh summary from the parent class
+        summary = super().get_summary(force_refresh=force_refresh, now=current_time)
+        
+        # Cache the result
+        self.cached_summary = summary
+        self.cached_summary_time = current_time
+        
+        return summary
 
     def _decide_reaction_type(self, observation: str, now: Optional[datetime] = None) -> str:
         """Uses an LLM call to determine the *type* of reaction."""
@@ -201,6 +223,10 @@ class AutonomousGenerativeAgent(GenerativeAgent):
         """
         if not self.memory:
              raise ValueError("Agent memory is not initialized before generating reaction.")
+
+        # Reset the summary cache at the start of a new reaction generation
+        self.cached_summary = None
+        self.cached_summary_time = None
 
         self._initialize_chains()
         call_time = now or datetime.now()
@@ -252,6 +278,7 @@ class AutonomousGenerativeAgent(GenerativeAgent):
 
         else: # THINK, DO, or SAY involve a reaction
              memory_context, current_time_str = self._fetch_context(observation, call_time)
+             # Use the cached summary from the decision step
              agent_summary = self.get_summary(now=call_time, force_refresh=False)
 
              if reaction_type == "THINK":
@@ -297,16 +324,8 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                             action_taken=action_text,
                         ).strip().split('\n')[0].replace('"', '').replace("'", '').strip()
                         if updated_status:
-                            if len(updated_status) > 5 and not updated_status.startswith("Updated Status:"):
-                                self.status = updated_status
-                                print(f"{BColors.DIM}DEBUG (Agent {self.name}): Status updated to: '{self.status}'{BColors.ENDC}", flush=True)
-                            else:
-                                print(f"{BColors.WARNING}WARN (Agent {self.name}): Status update chain returned invalid status '{updated_status}'. Using fallback.{BColors.ENDC}", flush=True)
-                                self.status = f"Just {action_text}"
-                        else:
-                             print(f"{BColors.WARNING}WARN (Agent {self.name}): Status update chain returned empty. Using fallback.{BColors.ENDC}", flush=True)
-                             self.status = f"Just {action_text}"
-
+                            print(f"{BColors.OKGREEN}DEBUG (Agent {self.name}): Status updated from '{self.status}' to '{updated_status}'{BColors.ENDC}", flush=True)
+                            self.status = updated_status
                      except Exception as e_status:
                         print(f"{BColors.WARNING}WARN (Agent {self.name}): Failed to update status via LLM: {e_status}. Using fallback.{BColors.ENDC}", flush=True)
                         self.status = f"Just {action_text}"
