@@ -129,6 +129,11 @@ def generate_response_endpoint(agent_id: str, req: GenerateResponseReq):
         print(f"{BColors.OKGREEN}  - Important: {observation_was_important_flag}{BColors.ENDC}", flush=True)
         print(f"{BColors.OKGREEN}  - Poignancy Rating: {poignancy_rating}/10{BColors.ENDC}", flush=True)
 
+        # Add a direct print statement to ensure the rating is displayed in the logs
+        import sys
+        sys.stdout.write(f"\n==== POIGNANCY RATING FROM ROUTER: {poignancy_rating} ====\n")
+        sys.stdout.flush()
+
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error during reaction generation for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
         traceback.print_exc()
