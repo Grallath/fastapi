@@ -1,0 +1,19 @@
+# File: utils.py
+class BColors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    DIM = '\033[2m'
+    IMPORTANCE_HIGH = OKGREEN
+    IMPORTANCE_MEDIUM = WARNING
+    IMPORTANCE_LOW = FAIL
+    METADATA_KEY = OKCYAN
+    METADATA_VALUE = OKBLUE
+    CONTENT_COLOR = ENDC
+    SEPARATOR = DIM
