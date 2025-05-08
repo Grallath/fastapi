@@ -32,8 +32,16 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                     "Respond with a single integer.\n\nMemory: {observation_text}\n\nRating: "
                 )
                 prompt = PromptTemplate.from_template(poignancy_prompt_str)
-                chain = LLMChain(llm=self.llm, prompt=prompt)
+                chain = LLMChain(llm=self.llm, prompt=prompt, verbose=True)
+                # Print the prompt being sent to the LLM
+                print(f"{BColors.HEADER}DEBUG (Agent {self.name}): Sending poignancy rating prompt to LLM:{BColors.ENDC}")
+                print(f"{BColors.HEADER}{poignancy_prompt_str.format(observation_text=observation[:100] + '...' if len(observation) > 100 else observation)}{BColors.ENDC}")
+
+                # Run the chain and get the result
                 poignancy_result = chain.run(observation_text=observation).strip()
+
+                # Print the raw response from the LLM
+                print(f"{BColors.OKBLUE}DEBUG (Agent {self.name}): Raw LLM response for poignancy rating: '{poignancy_result}'{BColors.ENDC}")
 
                 # Extract the numeric rating
                 try:
@@ -42,17 +50,24 @@ class AutonomousGenerativeAgent(GenerativeAgent):
                     number_match = re.search(r'\b([1-9]|10)\b', poignancy_result)
                     if number_match:
                         poignancy_rating = int(number_match.group(1))
+                        print(f"{BColors.OKGREEN}DEBUG (Agent {self.name}): Successfully extracted rating: {poignancy_rating} from regex match{BColors.ENDC}")
                     else:
-                        poignancy_rating = int(poignancy_result)
-                except (ValueError, TypeError):
+                        try:
+                            poignancy_rating = int(poignancy_result)
+                            print(f"{BColors.OKGREEN}DEBUG (Agent {self.name}): Successfully converted full response to rating: {poignancy_rating}{BColors.ENDC}")
+                        except ValueError:
+                            print(f"{BColors.WARNING}DEBUG (Agent {self.name}): Could not parse rating from: '{poignancy_result}', defaulting to 0{BColors.ENDC}")
+                            poignancy_rating = 0
+                except (ValueError, TypeError) as e:
                     # If we can't parse a number, default to 0
+                    print(f"{BColors.WARNING}DEBUG (Agent {self.name}): Error parsing rating: {e}, defaulting to 0{BColors.ENDC}")
                     poignancy_rating = 0
 
                 # Consider ratings of 6 or higher as important
                 if poignancy_rating >= 6:
                     estimated_observation_importance = True
 
-                print(f"{BColors.DIM}DEBUG (Agent {self.name}): Observation poignancy rating: {poignancy_rating}/10, API important flag: {estimated_observation_importance}{BColors.ENDC}")
+                print(f"{BColors.OKGREEN}DEBUG (Agent {self.name}): Final observation poignancy rating: {poignancy_rating}/10, API important flag: {estimated_observation_importance}{BColors.ENDC}")
         except Exception as e_poignancy:
             print(f"{BColors.WARNING}WARN (Agent {self.name}): Could not estimate observation poignancy for API flag: {e_poignancy}{BColors.ENDC}")
 

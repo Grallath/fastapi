@@ -118,8 +118,16 @@ def generate_response_endpoint(agent_id: str, req: GenerateResponseReq):
         if req.k is not None and req.k > 0 and hasattr(retriever, 'k'):
             retriever.k = req.k
 
+        # Call the agent's get_interpreted_reaction method
+        print(f"{BColors.HEADER}DEBUG: Calling agent.get_interpreted_reaction...{BColors.ENDC}", flush=True)
         api_reaction_type, api_content, observation_was_important_flag, poignancy_rating = agent.get_interpreted_reaction(observation, datetime.now())
-        print(f"{BColors.OKGREEN}DEBUG: agent.get_interpreted_reaction completed. API Type: '{api_reaction_type}', Important: {observation_was_important_flag}, Poignancy Rating: {poignancy_rating}/10{BColors.ENDC}", flush=True)
+
+        # Log the results with more detail
+        print(f"{BColors.OKGREEN}DEBUG: agent.get_interpreted_reaction completed with the following results:{BColors.ENDC}", flush=True)
+        print(f"{BColors.OKGREEN}  - API Type: '{api_reaction_type}'{BColors.ENDC}", flush=True)
+        print(f"{BColors.OKGREEN}  - Content: '{api_content[:50]}...'{BColors.ENDC}", flush=True)
+        print(f"{BColors.OKGREEN}  - Important: {observation_was_important_flag}{BColors.ENDC}", flush=True)
+        print(f"{BColors.OKGREEN}  - Poignancy Rating: {poignancy_rating}/10{BColors.ENDC}", flush=True)
 
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error during reaction generation for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
