@@ -113,13 +113,13 @@ def generate_response_endpoint(agent_id: str, req: GenerateResponseReq):
     if hasattr(retriever, 'k'):
          original_k = retriever.k
 
-    api_reaction_type, api_content, observation_was_important_flag = "UNKNOWN", "", False
+    api_reaction_type, api_content, observation_was_important_flag, poignancy_rating = "UNKNOWN", "", False, 0
     try:
         if req.k is not None and req.k > 0 and hasattr(retriever, 'k'):
             retriever.k = req.k
-        
-        api_reaction_type, api_content, observation_was_important_flag = agent.get_interpreted_reaction(observation, datetime.now())
-        print(f"{BColors.OKGREEN}DEBUG: agent.get_interpreted_reaction completed. API Type: '{api_reaction_type}', Important: {observation_was_important_flag}{BColors.ENDC}", flush=True)
+
+        api_reaction_type, api_content, observation_was_important_flag, poignancy_rating = agent.get_interpreted_reaction(observation, datetime.now())
+        print(f"{BColors.OKGREEN}DEBUG: agent.get_interpreted_reaction completed. API Type: '{api_reaction_type}', Important: {observation_was_important_flag}, Poignancy Rating: {poignancy_rating}/10{BColors.ENDC}", flush=True)
 
     except Exception as e:
         print(f"{BColors.FAIL}ERROR_STACKTRACE: Error during reaction generation for agent {agent_id}: {e}{BColors.ENDC}", flush=True)
@@ -131,7 +131,8 @@ def generate_response_endpoint(agent_id: str, req: GenerateResponseReq):
 
     return GenerateReactionResponse(
         agent_name=agent.name, reaction_type=api_reaction_type,
-        content=api_content, observation_was_important=observation_was_important_flag
+        content=api_content, observation_was_important=observation_was_important_flag,
+        poignancy_rating=poignancy_rating
     )
 
 @router.post("/{agent_id}/add_memory", response_model=AddedMemoryResponse)
@@ -164,7 +165,7 @@ def fetch_memories_endpoint(agent_id: str, req: FetchMemoriesReq):
 
     original_k, retriever = -1, agent.memory.memory_retriever
     if hasattr(retriever, 'k'): original_k = retriever.k
-    
+
     response_payload_docs: List[FetchedMemoriesDocument] = []
     try:
         requested_k = retriever.k # Default to retriever's k

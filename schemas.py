@@ -23,6 +23,7 @@ class GenerateReactionResponse(BaseModel):
     reaction_type: str # SAY, THINK, DO, IGNORE, UNKNOWN
     content: str
     observation_was_important: bool
+    poignancy_rating: int = Field(default=0, ge=0, le=10)
 
 class AddMemoryReq(BaseModel):
     text_to_memorize: str
